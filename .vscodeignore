@@ -1,0 +1,14 @@
+.gitignore
+.nvmrc
+.vscode/**
+src/**
+dist/test/**
+dist/**/*.map
+esbuild.mjs
+tsconfig.json
+biome.json
+**/*.ts
+**/*.vsix
+node_modules/**
+pnpm-lock.yaml
+pnpm-workspace.yaml

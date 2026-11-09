@@ -1,0 +1,99 @@
+{
+  "name": "fuel",
+  "displayName": "Cursor Fuel",
+  "description": "Cursor plan spend in the sidebar.",
+  "version": "1.0.0",
+  "publisher": "lucasboucher",
+  "license": "MIT",
+  "homepage": "https://github.com/lucasboucher/fuel",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lucasboucher/fuel.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lucasboucher/fuel/issues"
+  },
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#262C37",
+    "theme": "dark"
+  },
+  "packageManager": "pnpm@12.18.0",
+  "engines": {
+    "vscode": "^1.128.0",
+    "node": ">=26",
+    "pnpm": ">=12"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "fuel",
+          "title": "Fuel",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "fuel": [
+        {
+          "id": "fuel.view",
+          "name": "Cursor Fuel",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "fuel.refresh",
+        "title": "Rafraîchir",
+        "icon": "$(refresh)",
+        "category": "Cursor Fuel"
+      },
+      {
+        "command": "fuel.setApiKey",
+        "title": "Définir la clé d’API",
+        "category": "Cursor Fuel"
+      },
+      {
+        "command": "fuel.clearApiKey",
+        "title": "Oublier la clé d’API",
+        "category": "Cursor Fuel"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "fuel.refresh",
+          "when": "view == fuel.view",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "check": "pnpm typecheck && pnpm lint",
+    "test": "pnpm compile && node --test dist/test/*.js",
+    "package": "pnpm check && pnpm compile && vsce package --no-dependencies",
+    "vscode:prepublish": "pnpm compile"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.6",
+    "@types/node": "^24.10.4",
+    "@types/vscode": "1.125.0",
+    "@vscode/vsce": "^4.1.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}
