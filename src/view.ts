@@ -1,32 +1,29 @@
 import * as vscode from 'vscode';
-import { badgePercentFor, type ViewState } from './state.js';
-import type { SpendSnapshot } from './usage.js';
+import type { UsageSnapshot } from './usage.js';
+import { badgePercentFor, type ViewState } from './view-state.js';
 
-export type { ViewState };
-
-type FuelItem = {
+type FuelNode = {
   id: string;
   label: string;
   description?: string;
-  tooltip?: string;
   icon?: vscode.ThemeIcon;
-  command?: vscode.Command;
-  children?: FuelItem[];
+  children?: FuelNode[];
 };
 
-export class FuelViewProvider implements vscode.TreeDataProvider<FuelItem>, vscode.Disposable {
-  static readonly viewType = 'fuel.view';
+export class FuelTreeDataProvider implements vscode.TreeDataProvider<FuelNode>, vscode.Disposable {
+  static readonly viewId = 'fuel.view';
 
   private readonly onDidChangeTreeDataEmitter = new vscode.EventEmitter<
-    FuelItem | undefined | null
+    FuelNode | undefined | null
   >();
   readonly onDidChangeTreeData = this.onDidChangeTreeDataEmitter.event;
 
   private state: ViewState = { kind: 'loading' };
-  private treeView?: vscode.TreeView<FuelItem>;
-  attach(treeView: vscode.TreeView<FuelItem>): void {
+  private treeView?: vscode.TreeView<FuelNode>;
+
+  attach(treeView: vscode.TreeView<FuelNode>): void {
     this.treeView = treeView;
-    this.syncChrome();
+    this.syncTreeView();
   }
 
   dispose(): void {
@@ -36,100 +33,37 @@ export class FuelViewProvider implements vscode.TreeDataProvider<FuelItem>, vsco
   setState(state: ViewState): void {
     this.state = state;
     this.onDidChangeTreeDataEmitter.fire(undefined);
-    this.syncChrome();
+    this.syncTreeView();
   }
 
   getState(): ViewState {
     return this.state;
   }
 
-  getTreeItem(element: FuelItem): vscode.TreeItem {
-    const collapsible = element.children?.length
+  getTreeItem(node: FuelNode): vscode.TreeItem {
+    const collapsibleState = node.children?.length
       ? vscode.TreeItemCollapsibleState.Expanded
       : vscode.TreeItemCollapsibleState.None;
-    const item = new vscode.TreeItem(element.label, collapsible);
-    item.id = element.id;
-    if (element.description !== undefined) {
-      item.description = element.description;
+    const item = new vscode.TreeItem(node.label, collapsibleState);
+    item.id = node.id;
+    if (node.description !== undefined) {
+      item.description = node.description;
     }
-    if (element.tooltip !== undefined) {
-      item.tooltip = element.tooltip;
-    }
-    if (element.icon) {
-      item.iconPath = element.icon;
-    }
-    if (element.command) {
-      item.command = element.command;
+    if (node.icon) {
+      item.iconPath = node.icon;
     }
     return item;
   }
 
-  getChildren(element?: FuelItem): FuelItem[] {
-    if (element) {
-      return element.children ?? [];
+  getChildren(node?: FuelNode): FuelNode[] {
+    if (node) {
+      return node.children ?? [];
     }
-
-    if (this.state.kind === 'loading') {
-      return [
-        {
-          id: 'loading',
-          label: this.state.email ? `Chargement · ${this.state.email}…` : 'Chargement…',
-          icon: new vscode.ThemeIcon('loading~spin'),
-        },
-      ];
-    }
-
-    if (this.state.kind === 'needs_key') {
-      return [
-        {
-          id: 'needs-key',
-          label: 'Clé d’API manquante',
-          description: 'Définir la clé',
-          icon: new vscode.ThemeIcon('key'),
-          command: {
-            command: 'fuel.setApiKey',
-            title: 'Définir la clé d’API',
-          },
-        },
-        {
-          id: 'dashboard',
-          label: 'Ouvrir le tableau de bord',
-          icon: new vscode.ThemeIcon('link-external'),
-          command: {
-            command: 'vscode.open',
-            title: 'Ouvrir le tableau de bord',
-            arguments: [vscode.Uri.parse('https://cursor.com/dashboard/spending')],
-          },
-        },
-      ];
-    }
-
-    if (this.state.kind === 'error') {
-      const items: FuelItem[] = [];
-      if (this.state.code === 'unauthorized') {
-        items.push({
-          id: 'set-key',
-          label: 'Définir la clé',
-          icon: new vscode.ThemeIcon('key'),
-          command: { command: 'fuel.setApiKey', title: 'Définir la clé d’API' },
-        });
-      }
-      items.push({
-        id: 'retry',
-        label: 'Réessayer',
-        icon: new vscode.ThemeIcon('refresh'),
-        command: { command: 'fuel.refresh', title: 'Rafraîchir' },
-      });
-      if (this.state.snapshot) {
-        items.push(...snapshotRoots(this.state.snapshot, true));
-      }
-      return items;
-    }
-
-    return snapshotRoots(this.state.snapshot, false);
+    const snapshot = shownSnapshot(this.state);
+    return snapshot ? snapshotNodes(snapshot) : [];
   }
 
-  private syncChrome(): void {
+  private syncTreeView(): void {
     if (!this.treeView) {
       return;
     }
@@ -137,171 +71,170 @@ export class FuelViewProvider implements vscode.TreeDataProvider<FuelItem>, vsco
     const badgePercent = badgePercentFor(this.state);
     if (badgePercent !== undefined) {
       const value = Math.round(badgePercent);
-      this.treeView.badge = {
-        value,
-        tooltip: `${value} % d’usage inclus`,
-      };
+      this.treeView.badge = { value, tooltip: `${formatPercent(value)} de l’usage inclus` };
     } else {
       this.treeView.badge = undefined;
     }
 
-    if (this.state.kind === 'ready' || this.state.kind === 'loading') {
-      this.treeView.message = '';
-      return;
-    }
-    if (this.state.kind === 'needs_key') {
-      this.treeView.message = 'Ajoute une clé d’API d’équipe pour afficher ta dépense du cycle.';
-      return;
-    }
-    this.treeView.message = this.state.message;
+    this.treeView.message = viewMessage(this.state);
   }
 }
 
-function snapshotRoots(snapshot: SpendSnapshot, nested: boolean): FuelItem[] {
-  const identity: FuelItem = {
-    id: nested ? 'cached-title' : 'identity',
-    label: nested ? 'Dernière valeur connue' : snapshot.name || snapshot.email,
-    icon: new vscode.ThemeIcon('account'),
-  };
-  if (nested || snapshot.name) {
-    identity.description = snapshot.email;
-  }
+function shownSnapshot(state: ViewState): UsageSnapshot | undefined {
+  return state.kind === 'loading' ? undefined : state.snapshot;
+}
 
-  const usageChildren: FuelItem[] = [];
-  if (snapshot.totalPercentUsed !== undefined) {
-    usageChildren.push({
-      id: 'total-usage',
-      label: 'Total inclus',
-      description: formatPercent(snapshot.totalPercentUsed),
-      icon: new vscode.ThemeIcon('dashboard'),
-    });
+function viewMessage(state: ViewState): string {
+  if (state.kind === 'loading') {
+    return 'Chargement…';
   }
-  if (snapshot.cursorModelsPercent !== undefined) {
-    usageChildren.push({
-      id: 'cursor-models',
-      label: 'Modèles Cursor',
-      description: formatPercent(snapshot.cursorModelsPercent),
-      icon: new vscode.ThemeIcon('rocket'),
-    });
+  if (state.kind === 'error') {
+    return state.message;
   }
-  if (snapshot.otherModelsPercent !== undefined) {
-    usageChildren.push({
-      id: 'other-models',
-      label: 'Autres modèles',
-      description: formatPercent(snapshot.otherModelsPercent),
-      icon: new vscode.ThemeIcon('symbol-misc'),
-    });
-  }
+  return '';
+}
 
-  const spendChildren: FuelItem[] = [
+function snapshotNodes(snapshot: UsageSnapshot): FuelNode[] {
+  const teamNodes: FuelNode[] = [
     {
-      id: 'included',
-      label: 'Dépense incluse',
-      description: formatDollars(snapshot.includedSpendDollars),
-      icon: new vscode.ThemeIcon('credit-card'),
+      id: 'team-name',
+      label: snapshot.teamName,
+      icon: new vscode.ThemeIcon('organization'),
     },
     {
-      id: 'ondemand',
+      id: 'team-on-demand',
+      label: 'À la demande',
+      description: snapshot.teamOnDemandEnabled ? 'Activé' : 'Désactivé',
+      icon: new vscode.ThemeIcon('zap'),
+    },
+  ];
+
+  if (snapshot.teamOnDemandEnabled) {
+    teamNodes.push({
+      id: 'team-spend-limit',
+      label: 'Limite d’équipe',
+      description:
+        snapshot.teamSpendLimitDollars === null
+          ? 'Sans limite'
+          : formatDollars(snapshot.teamSpendLimitDollars),
+      icon: new vscode.ThemeIcon('target'),
+    });
+  }
+
+  const usageNodes: FuelNode[] = [
+    {
+      id: 'usage-total',
+      label: 'Total',
+      description: formatPercent(snapshot.totalPercentUsed),
+      icon: new vscode.ThemeIcon('dashboard'),
+    },
+    {
+      id: 'usage-cursor-models',
+      label: 'Modèles Cursor',
+      description: formatPercent(snapshot.cursorModelsPercentUsed),
+      icon: new vscode.ThemeIcon('sparkle'),
+    },
+    {
+      id: 'usage-other-models',
+      label: 'Autres modèles',
+      description: formatPercent(snapshot.otherModelsPercentUsed),
+      icon: new vscode.ThemeIcon('symbol-misc'),
+    },
+  ];
+
+  const spendNodes: FuelNode[] = [
+    {
+      id: 'spend-overall',
+      label: 'Total',
+      description: formatDollars(snapshot.overallSpendDollars),
+      icon: new vscode.ThemeIcon('graph'),
+    },
+    {
+      id: 'spend-included',
+      label: 'Incluse',
+      description: formatDollars(snapshot.includedSpendDollars),
+      icon: new vscode.ThemeIcon('pass'),
+    },
+    {
+      id: 'spend-on-demand',
       label: 'À la demande',
       description: formatDollars(snapshot.onDemandSpendDollars),
       icon: new vscode.ThemeIcon('flame'),
     },
   ];
 
-  if (snapshot.limitDollars !== undefined) {
-    spendChildren.push(
-      {
-        id: 'limit',
-        label: 'Limite',
-        description: formatDollars(snapshot.limitDollars),
-        icon: new vscode.ThemeIcon('target'),
-      },
-      {
-        id: 'used',
-        label: 'Utilisé (limite $)',
-        description: formatPercent(snapshot.percentUsed),
-        icon: new vscode.ThemeIcon('pie-chart'),
-      },
-    );
-  } else if (usageChildren.length === 0) {
-    spendChildren.push({
-      id: 'nolimit',
-      label: 'Aucune limite individuelle renseignée',
-      icon: new vscode.ThemeIcon('info'),
-    });
-  }
-
-  const roots: FuelItem[] = [identity];
-
-  if (usageChildren.length > 0) {
-    roots.push({
-      id: 'group-usage',
-      label: 'Usage',
-      children: usageChildren,
-    });
-  }
-
-  roots.push({
-    id: 'group-spend',
-    label: 'Dépenses',
-    children: spendChildren,
-  });
-
-  roots.push({
-    id: 'group-cycle',
-    label: 'Cycle',
-    children: [
-      {
-        id: 'cycle',
-        label: 'Début du cycle',
-        description: formatDate(snapshot.cycleStart),
-        icon: new vscode.ThemeIcon('calendar'),
-      },
-      {
-        id: 'fetched',
-        label: 'Mis à jour',
-        description: formatDate(snapshot.fetchedAt),
-        icon: new vscode.ThemeIcon('clock'),
-      },
-    ],
-  });
-
-  roots.push({
-    id: 'dashboard',
-    label: 'Tableau de bord',
-    icon: new vscode.ThemeIcon('link-external'),
-    command: {
-      command: 'vscode.open',
-      title: 'Tableau de bord',
-      arguments: [vscode.Uri.parse('https://cursor.com/dashboard/spending')],
+  const cycleNodes: FuelNode[] = [
+    {
+      id: 'cycle-start',
+      label: 'Début',
+      description: formatDateTime(snapshot.cycleStart),
+      icon: new vscode.ThemeIcon('calendar'),
     },
-  });
+    {
+      id: 'cycle-fetched-at',
+      label: 'Mis à jour',
+      description: formatDateTime(snapshot.fetchedAt),
+      icon: new vscode.ThemeIcon('clock'),
+    },
+    {
+      id: 'cycle-end',
+      label: 'Fin',
+      description: formatDateTime(snapshot.cycleEnd),
+      icon: new vscode.ThemeIcon('milestone'),
+    },
+  ];
 
-  return roots;
+  return [
+    {
+      id: 'identity',
+      label: snapshot.displayName,
+      description: snapshot.email,
+      icon: new vscode.ThemeIcon('account'),
+      children: teamNodes,
+    },
+    {
+      id: 'group-usage',
+      label: 'Usage inclus',
+      icon: new vscode.ThemeIcon('pie-chart'),
+      children: usageNodes,
+    },
+    {
+      id: 'group-spend',
+      label: 'Dépenses',
+      icon: new vscode.ThemeIcon('credit-card'),
+      children: spendNodes,
+    },
+    {
+      id: 'group-cycle',
+      label: 'Cycle',
+      icon: new vscode.ThemeIcon('history'),
+      children: cycleNodes,
+    },
+  ];
 }
+
+const DOLLARS_FORMAT = new Intl.NumberFormat('fr-FR', {
+  style: 'currency',
+  currency: 'USD',
+  currencyDisplay: 'narrowSymbol',
+});
+const PERCENT_FORMAT = new Intl.NumberFormat('fr-FR', {
+  style: 'percent',
+  maximumFractionDigits: 1,
+});
+const DATE_TIME_FORMAT = new Intl.DateTimeFormat('fr-FR', {
+  dateStyle: 'medium',
+  timeStyle: 'medium',
+});
 
 function formatDollars(value: number): string {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(value);
+  return DOLLARS_FORMAT.format(value);
 }
 
-function formatPercent(value: number | undefined): string {
-  if (value === undefined) {
-    return '—';
-  }
-  return `${new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 1 }).format(value)} %`;
+function formatPercent(value: number): string {
+  return PERCENT_FORMAT.format(value / 100);
 }
 
-function formatDate(value: string | undefined): string {
-  if (!value) {
-    return '—';
-  }
-  return new Intl.DateTimeFormat('fr-FR', {
-    dateStyle: 'medium',
-    timeStyle: 'medium',
-  }).format(new Date(value));
+function formatDateTime(value: string): string {
+  return DATE_TIME_FORMAT.format(new Date(value));
 }

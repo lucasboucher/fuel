@@ -1,36 +1,40 @@
-export type SpendSnapshot = {
+import type { CursorAccount } from './session.js';
+
+export type UsageSnapshot = {
   email: string;
-  name?: string;
+  displayName: string;
+  teamName: string;
   overallSpendDollars: number;
   includedSpendDollars: number;
   onDemandSpendDollars: number;
-  limitDollars?: number;
-  percentUsed?: number;
-  cursorModelsPercent?: number;
-  otherModelsPercent?: number;
-  totalPercentUsed?: number;
-  cycleStart?: string;
+  teamOnDemandEnabled: boolean;
+  teamSpendLimitDollars: number | null;
+  cursorModelsPercentUsed: number;
+  otherModelsPercentUsed: number;
+  totalPercentUsed: number;
+  cycleStart: string;
+  cycleEnd: string;
   fetchedAt: string;
 };
 
 export function snapshotForAccount(
-  value: unknown,
+  cached: unknown,
   email: string | undefined,
-): SpendSnapshot | undefined {
-  if (!email || !isSpendSnapshot(value)) {
+): UsageSnapshot | undefined {
+  if (!email || !isUsageSnapshot(cached)) {
     return undefined;
   }
-  if (value.email.trim().toLowerCase() !== email.trim().toLowerCase()) {
+  if (cached.email.trim().toLowerCase() !== email.trim().toLowerCase()) {
     return undefined;
   }
-  return value;
+  return cached;
 }
 
 export function mustForgetSnapshot(cached: unknown, email: string | undefined): boolean {
   if (cached === undefined) {
     return false;
   }
-  if (!isSpendSnapshot(cached)) {
+  if (!isUsageSnapshot(cached)) {
     return true;
   }
   if (!email) {
@@ -39,30 +43,48 @@ export function mustForgetSnapshot(cached: unknown, email: string | undefined): 
   return snapshotForAccount(cached, email) === undefined;
 }
 
-export function isSpendSnapshot(value: unknown): value is SpendSnapshot {
+export function isUsageSnapshot(value: unknown): value is UsageSnapshot {
   if (!value || typeof value !== 'object') {
     return false;
   }
   const snapshot = value as Record<string, unknown>;
   return (
     typeof snapshot.email === 'string' &&
-    typeof snapshot.overallSpendDollars === 'number' &&
-    Number.isFinite(snapshot.overallSpendDollars) &&
-    typeof snapshot.includedSpendDollars === 'number' &&
-    Number.isFinite(snapshot.includedSpendDollars) &&
-    typeof snapshot.onDemandSpendDollars === 'number' &&
-    Number.isFinite(snapshot.onDemandSpendDollars) &&
-    typeof snapshot.fetchedAt === 'string'
+    isNonEmptyString(snapshot.displayName) &&
+    isNonEmptyString(snapshot.teamName) &&
+    isNonNegativeNumber(snapshot.overallSpendDollars) &&
+    isNonNegativeNumber(snapshot.includedSpendDollars) &&
+    isNonNegativeNumber(snapshot.onDemandSpendDollars) &&
+    typeof snapshot.teamOnDemandEnabled === 'boolean' &&
+    (snapshot.teamSpendLimitDollars === null ||
+      isNonNegativeNumber(snapshot.teamSpendLimitDollars)) &&
+    isNonNegativeNumber(snapshot.cursorModelsPercentUsed) &&
+    isNonNegativeNumber(snapshot.otherModelsPercentUsed) &&
+    isNonNegativeNumber(snapshot.totalPercentUsed) &&
+    isDateString(snapshot.cycleStart) &&
+    isDateString(snapshot.cycleEnd) &&
+    isDateString(snapshot.fetchedAt)
   );
 }
 
 export type UsageErrorCode =
-  | 'missing_email'
+  | 'missing_account'
+  | 'missing_session'
+  | 'expired_session'
   | 'unauthorized'
-  | 'forbidden'
-  | 'not_found'
+  | 'http_status'
+  | 'unreadable'
   | 'network'
-  | 'vault';
+  | 'unexpected';
+
+export function blocksPolling(code: UsageErrorCode): boolean {
+  return (
+    code === 'missing_account' ||
+    code === 'missing_session' ||
+    code === 'expired_session' ||
+    code === 'unauthorized'
+  );
+}
 
 export class UsageError extends Error {
   constructor(
@@ -74,222 +96,128 @@ export class UsageError extends Error {
   }
 }
 
-type MemberSpend = {
-  email?: string;
-  name?: string;
-  spendCents?: number;
-  overallSpendCents?: number;
-  includedSpendCents?: number;
-  effectivePerUserLimitDollars?: number | null;
-  monthlyLimitDollars?: number | null;
-  autoPercentUsed?: number;
-  apiPercentUsed?: number;
-  totalPercentUsed?: number;
-};
-
-type SpendResponse = {
-  teamMemberSpend?: MemberSpend[];
-  subscriptionCycleStart?: number;
-};
-
-const API_BASE = 'https://api.cursor.com';
+const USAGE_SUMMARY_URL = 'https://cursor.com/api/usage-summary';
 const REQUEST_TIMEOUT_MS = 10_000;
 
-export async function fetchSpend(input: {
-  apiKey: string;
-  email: string;
-  fetchImpl?: typeof fetch;
-}): Promise<SpendSnapshot> {
-  const fetchImpl = input.fetchImpl ?? fetch;
-  const apiKey = input.apiKey.trim();
-  const body = JSON.stringify({
-    searchTerm: input.email,
-    page: 1,
-    pageSize: 25,
-  });
+type UsageSummary = {
+  billingCycleStart: unknown;
+  billingCycleEnd: unknown;
+  individualUsage?: {
+    plan?: {
+      autoPercentUsed?: unknown;
+      apiPercentUsed?: unknown;
+      totalPercentUsed?: unknown;
+      breakdown?: { total?: unknown };
+    };
+    onDemand?: { used?: unknown };
+  };
+  teamUsage?: { onDemand?: { enabled?: unknown; limit?: unknown } };
+};
 
+export function snapshotFromSummary(
+  payload: unknown,
+  account: CursorAccount,
+  fetchedAt: string,
+): UsageSnapshot {
+  if (!payload || typeof payload !== 'object') {
+    throw unreadableSummaryError();
+  }
+  const summary = payload as UsageSummary;
+  const plan = summary.individualUsage?.plan;
+  const teamOnDemand = summary.teamUsage?.onDemand;
+  const includedCents = requireNonNegativeNumber(plan?.breakdown?.total);
+  const onDemandCents = requireNonNegativeNumber(summary.individualUsage?.onDemand?.used);
+  const teamLimitCents = teamOnDemand?.limit;
+  if (typeof teamOnDemand?.enabled !== 'boolean') {
+    throw unreadableSummaryError();
+  }
+
+  return {
+    email: account.email,
+    displayName: account.displayName,
+    teamName: account.teamName,
+    overallSpendDollars: centsToDollars(includedCents + onDemandCents),
+    includedSpendDollars: centsToDollars(includedCents),
+    onDemandSpendDollars: centsToDollars(onDemandCents),
+    teamOnDemandEnabled: teamOnDemand.enabled,
+    teamSpendLimitDollars:
+      teamLimitCents === null ? null : centsToDollars(requireNonNegativeNumber(teamLimitCents)),
+    cursorModelsPercentUsed: requirePercent(plan?.autoPercentUsed),
+    otherModelsPercentUsed: requirePercent(plan?.apiPercentUsed),
+    totalPercentUsed: requirePercent(plan?.totalPercentUsed),
+    cycleStart: requireIsoDate(summary.billingCycleStart),
+    cycleEnd: requireIsoDate(summary.billingCycleEnd),
+    fetchedAt,
+  };
+}
+
+export async function fetchUsageSnapshot(input: {
+  cookie: string;
+  account: CursorAccount;
+}): Promise<UsageSnapshot> {
   let response: Response;
   try {
-    response = await postSpend(fetchImpl, apiKey, body, 'basic');
-    // Fine-grained grok_ keys sometimes prefer Bearer over Basic.
-    if (response.status === 401 && apiKey.startsWith('grok_')) {
-      response = await postSpend(fetchImpl, apiKey, body, 'bearer');
-    }
+    response = await fetch(USAGE_SUMMARY_URL, {
+      headers: { Cookie: input.cookie },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
   } catch {
-    throw new UsageError('network', 'Impossible de joindre l’API Cursor.');
+    throw new UsageError('network', 'Cursor injoignable. Nouvel essai automatique.');
   }
 
   if (response.status === 401) {
-    throw new UsageError(
-      'unauthorized',
-      await detailMessage(
-        response,
-        'Clé d’API refusée. Vérifie une clé Team (pas User) avec « View member usage ».',
-      ),
-    );
-  }
-  if (response.status === 403) {
-    throw new UsageError(
-      'forbidden',
-      await detailMessage(response, 'Cette facturation n’ouvre pas l’endpoint de dépense.'),
-    );
+    throw new UsageError('unauthorized', 'Session Cursor expirée. Redémarre Cursor.');
   }
   if (!response.ok) {
     throw new UsageError(
-      'network',
-      await detailMessage(response, `L’API a répondu ${response.status}.`),
+      'http_status',
+      `Cursor indisponible (erreur ${response.status}). Nouvel essai automatique.`,
     );
   }
 
-  const payload = (await response.json()) as SpendResponse;
-  return normalizeSpend(payload, input.email, new Date().toISOString());
-}
-
-async function postSpend(
-  fetchImpl: typeof fetch,
-  apiKey: string,
-  body: string,
-  mode: 'basic' | 'bearer',
-): Promise<Response> {
-  const authorization =
-    mode === 'basic'
-      ? `Basic ${Buffer.from(`${apiKey}:`, 'utf8').toString('base64')}`
-      : `Bearer ${apiKey}`;
-
-  return fetchImpl(`${API_BASE}/teams/spend`, {
-    method: 'POST',
-    headers: {
-      Authorization: authorization,
-      'Content-Type': 'application/json',
-    },
-    body,
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-}
-
-async function detailMessage(response: Response, fallback: string): Promise<string> {
+  let payload: unknown;
   try {
-    const payload = (await response.json()) as {
-      message?: string;
-      error?: string;
-    };
-    const detail = payload.message?.trim() || payload.error?.trim();
-    if (detail) {
-      return `${fallback} (${detail})`;
-    }
+    payload = await response.json();
   } catch {
-    // ignore non-JSON bodies
+    throw unreadableSummaryError();
   }
-  return fallback;
+  return snapshotFromSummary(payload, input.account, new Date().toISOString());
 }
 
-export function normalizeSpend(
-  payload: SpendResponse,
-  email: string,
-  fetchedAt: string,
-): SpendSnapshot {
-  const members = payload.teamMemberSpend ?? [];
-  const target = email.trim().toLowerCase();
-  const member = members.find((item) => item.email?.trim().toLowerCase() === target);
-
-  if (!member) {
-    throw new UsageError('not_found', 'Aucune dépense trouvée pour cet e-mail.');
-  }
-
-  const onDemandSpendDollars = centsToDollars(member.spendCents);
-  const hasIncluded = Number.isFinite(member.includedSpendCents);
-  const hasOverall = Number.isFinite(member.overallSpendCents);
-
-  // Prefer API included cents. Otherwise derive in cents, then round once to dollars.
-  const includedSpendDollars = hasIncluded
-    ? centsToDollars(member.includedSpendCents)
-    : hasOverall
-      ? centsToDollars(
-          Math.max(0, finiteCents(member.overallSpendCents) - finiteCents(member.spendCents)),
-        )
-      : 0;
-
-  const overallSpendDollars = hasOverall
-    ? centsToDollars(member.overallSpendCents)
-    : roundMoney(includedSpendDollars + onDemandSpendDollars);
-
-  const limitDollars = firstPositive(
-    member.effectivePerUserLimitDollars,
-    member.monthlyLimitDollars,
-  );
-  const percentUsed =
-    limitDollars !== undefined && limitDollars > 0
-      ? Math.min(100, Math.round((overallSpendDollars / limitDollars) * 1000) / 10)
-      : undefined;
-
-  const cursorModelsPercent = normalizePercent(member.autoPercentUsed);
-  const otherModelsPercent = normalizePercent(member.apiPercentUsed);
-  const totalPercentUsed = normalizePercent(member.totalPercentUsed);
-
-  const snapshot: SpendSnapshot = {
-    email: member.email?.trim() || email,
-    overallSpendDollars,
-    includedSpendDollars,
-    onDemandSpendDollars,
-    fetchedAt,
-  };
-
-  const name = member.name?.trim();
-  if (name) {
-    snapshot.name = name;
-  }
-  if (limitDollars !== undefined) {
-    snapshot.limitDollars = limitDollars;
-  }
-  if (percentUsed !== undefined) {
-    snapshot.percentUsed = percentUsed;
-  }
-  if (cursorModelsPercent !== undefined) {
-    snapshot.cursorModelsPercent = cursorModelsPercent;
-  }
-  if (otherModelsPercent !== undefined) {
-    snapshot.otherModelsPercent = otherModelsPercent;
-  }
-  if (totalPercentUsed !== undefined) {
-    snapshot.totalPercentUsed = totalPercentUsed;
-  }
-  if (
-    typeof payload.subscriptionCycleStart === 'number' &&
-    Number.isFinite(payload.subscriptionCycleStart)
-  ) {
-    snapshot.cycleStart = new Date(payload.subscriptionCycleStart).toISOString();
-  }
-
-  return snapshot;
+function unreadableSummaryError(): UsageError {
+  return new UsageError('unreadable', 'Réponse de Cursor illisible. Nouvel essai automatique.');
 }
 
-function finiteCents(cents: number | undefined): number {
-  if (typeof cents !== 'number' || !Number.isFinite(cents) || cents < 0) {
-    return 0;
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isNonNegativeNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function requireNonNegativeNumber(value: unknown): number {
+  if (!isNonNegativeNumber(value)) {
+    throw unreadableSummaryError();
   }
-  return cents;
+  return value;
 }
 
-function centsToDollars(cents: number | undefined): number {
-  return roundMoney(finiteCents(cents) / 100);
+function requirePercent(value: unknown): number {
+  return Math.min(100, Math.round(requireNonNegativeNumber(value) * 10) / 10);
 }
 
-function roundMoney(value: number): number {
-  return Math.round(value * 100) / 100;
+function isDateString(value: unknown): value is string {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value));
 }
 
-function normalizePercent(value: number | undefined): number | undefined {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-    return undefined;
+function requireIsoDate(value: unknown): string {
+  if (!isDateString(value)) {
+    throw unreadableSummaryError();
   }
-  return Math.min(100, Math.round(value * 10) / 10);
+  return new Date(value).toISOString();
 }
 
-function firstPositive(...values: Array<number | null | undefined>): number | undefined {
-  for (const value of values) {
-    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-      return value;
-    }
-  }
-  return undefined;
+function centsToDollars(cents: number): number {
+  return Math.round(cents) / 100;
 }

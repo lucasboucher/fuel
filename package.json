@@ -2,9 +2,9 @@
   "name": "fuel",
   "displayName": "Cursor Fuel",
   "description": "Cursor plan spend in the sidebar.",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "publisher": "lucasboucher",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://github.com/lucasboucher/fuel",
   "repository": {
     "type": "git",
@@ -25,8 +25,19 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
+  "extensionKind": [
+    "ui"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    },
+    "virtualWorkspaces": true
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -55,13 +66,9 @@
         "enablement": "!fuel.refreshing"
       },
       {
-        "command": "fuel.setApiKey",
-        "title": "Définir la clé d’API",
-        "category": "Cursor Fuel"
-      },
-      {
-        "command": "fuel.clearApiKey",
-        "title": "Oublier la clé d’API",
+        "command": "fuel.openDashboard",
+        "title": "Voir sur cursor.com",
+        "icon": "$(link-external)",
         "category": "Cursor Fuel"
       }
     ],
@@ -70,7 +77,12 @@
         {
           "command": "fuel.refresh",
           "when": "view == fuel.view",
-          "group": "navigation"
+          "group": "navigation@1"
+        },
+        {
+          "command": "fuel.openDashboard",
+          "when": "view == fuel.view",
+          "group": "navigation@2"
         }
       ]
     }
@@ -83,9 +95,10 @@
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "check": "pnpm typecheck && pnpm lint",
-    "test": "pnpm compile && node --test dist/test/*.js",
-    "package": "pnpm check && pnpm compile && vsce package --no-dependencies",
-    "vscode:prepublish": "pnpm compile"
+    "compile-tests": "tsc -p . --outDir out",
+    "test": "pnpm compile-tests && node --test out/test/*.test.js",
+    "package": "vsce package --no-dependencies",
+    "vscode:prepublish": "pnpm check && node esbuild.mjs --production"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.6",

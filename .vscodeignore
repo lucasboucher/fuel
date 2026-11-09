@@ -2,7 +2,7 @@
 .nvmrc
 .vscode/**
 src/**
-dist/test/**
+out/**
 dist/**/*.map
 esbuild.mjs
 tsconfig.json

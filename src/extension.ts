@@ -1,75 +1,72 @@
 import * as vscode from 'vscode';
-import { nextPoll, shouldRefreshOnFocus } from './poller.js';
-import { ApiKeyStore, readCachedEmail, withTimeout } from './session.js';
+import { decideNextPoll, shouldRefreshOnFocus } from './poller.js';
+import { readCachedAccount, readSessionCookie } from './session.js';
 import {
-  fetchSpend,
+  blocksPolling,
+  fetchUsageSnapshot,
   mustForgetSnapshot,
-  type SpendSnapshot,
   snapshotForAccount,
   UsageError,
+  type UsageSnapshot,
 } from './usage.js';
-import { FuelViewProvider, type ViewState } from './view.js';
+import { FuelTreeDataProvider } from './view.js';
+import type { ViewState } from './view-state.js';
 
 const SNAPSHOT_KEY = 'fuel.snapshot';
-const SECRET_TIMEOUT_MS = 2_000;
-const CTX_REFRESHING = 'fuel.refreshing';
+const REFRESHING_CONTEXT_KEY = 'fuel.refreshing';
+const DASHBOARD_URL = 'https://cursor.com/dashboard/spending';
 
 export function activate(context: vscode.ExtensionContext): void {
-  const keys = ApiKeyStore.fromContext(context);
-  const provider = new FuelViewProvider();
-  let viewVisible = false;
+  const treeDataProvider = new FuelTreeDataProvider();
   let lastSuccessAt: number | undefined;
   let lastAttemptAt: number | undefined;
   let consecutiveFailures = 0;
-  let inflight: Promise<void> | undefined;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let inflightRefresh: Promise<void> | undefined;
+  let pollTimer: ReturnType<typeof setTimeout> | undefined;
   let refreshGeneration = 0;
   let disposed = false;
-  let announceRequested = false;
-  let announceStatus: vscode.Disposable | undefined;
-  let hasApiKey: boolean | undefined;
 
-  const setRefreshing = (value: boolean): void => {
-    void vscode.commands.executeCommand('setContext', CTX_REFRESHING, value);
+  const setRefreshingContext = (refreshing: boolean): void => {
+    void vscode.commands.executeCommand('setContext', REFRESHING_CONTEXT_KEY, refreshing);
   };
 
-  const clearAnnounceSpin = (): void => {
-    announceStatus?.dispose();
-    announceStatus = undefined;
-  };
-
-  const emailMissing = (): boolean => {
-    const state = provider.getState();
-    return state.kind === 'error' && state.code === 'missing_email';
+  const isBlocked = (): boolean => {
+    const state = treeDataProvider.getState();
+    return state.kind === 'error' && blocksPolling(state.code);
   };
 
   // Each globalState write is echoed back and replaces the whole map.
-  // Chain them so an older echo cannot drop a newer value.
-  let snapshotWrite: Promise<void> = Promise.resolve();
-  const writeSnapshot = (value: SpendSnapshot | undefined): Promise<void> => {
-    const run = (): Thenable<void> => context.globalState.update(SNAPSHOT_KEY, value);
-    snapshotWrite = snapshotWrite.then(run, run);
-    return snapshotWrite;
+  // Chain them so an older echo cannot drop a newer value. A rejected write
+  // still resolves, so the view can show the snapshot and the next write runs.
+  let snapshotWriteChain: Promise<void> = Promise.resolve();
+  const writeSnapshot = (snapshot: UsageSnapshot | undefined): Promise<void> => {
+    const write = (): Thenable<void> => context.globalState.update(SNAPSHOT_KEY, snapshot);
+    snapshotWriteChain = snapshotWriteChain.then(write, write).then(
+      () => undefined,
+      () => undefined,
+    );
+    return snapshotWriteChain;
   };
   const forgetSnapshot = (): Promise<void> => writeSnapshot(undefined);
 
-  const schedule = (manual = false): void => {
+  const clearPollTimer = (): void => {
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = undefined;
+    }
+  };
+
+  const schedulePoll = (manual = false): void => {
     if (disposed) {
       return;
     }
-    if (timer) {
-      clearTimeout(timer);
-      timer = undefined;
-    }
-
-    // A confirmed missing key never polls. Missing email waits for focus or Rafraîchir.
-    if (hasApiKey === false || (!manual && emailMissing())) {
+    clearPollTimer();
+    if (!manual && isBlocked()) {
       return;
     }
 
-    const decision = nextPoll({
+    const decision = decideNextPoll({
       now: Date.now(),
-      viewVisible,
       windowFocused: vscode.window.state.focused,
       consecutiveFailures,
       manual,
@@ -77,290 +74,193 @@ export function activate(context: vscode.ExtensionContext): void {
       ...(lastAttemptAt !== undefined ? { lastAttemptAt } : {}),
     });
 
-    if (decision.action === 'fetch') {
-      void refresh({ announce: false });
+    if (decision.action === 'refresh') {
+      void refresh();
       return;
     }
-
     if (decision.action === 'wait') {
-      timer = setTimeout(() => schedule(false), decision.delayMs);
+      pollTimer = setTimeout(() => schedulePoll(false), decision.delayMs);
     }
   };
 
-  const invalidateInflight = (): void => {
+  const cancelInflightRefresh = (): void => {
     refreshGeneration += 1;
-    inflight = undefined;
-    announceRequested = false;
-    clearAnnounceSpin();
-    setRefreshing(false);
+    inflightRefresh = undefined;
+    setRefreshingContext(false);
   };
 
-  const completeAnnounce = (outcome: 'ok' | 'error'): void => {
-    if (!announceRequested) {
-      return;
-    }
-    clearAnnounceSpin();
-    announceRequested = false;
-    if (outcome === 'ok') {
-      vscode.window.setStatusBarMessage('$(check) Cursor Fuel actualisé', 2_500);
-      return;
-    }
-    vscode.window.setStatusBarMessage('$(error) Cursor Fuel : échec du rafraîchissement', 3_000);
-  };
-
-  const refresh = async (options: { announce?: boolean } = {}): Promise<void> => {
+  const refresh = async (): Promise<void> => {
     if (disposed) {
       return;
     }
-
-    if (options.announce === true) {
-      announceRequested = true;
-      clearAnnounceSpin();
-      announceStatus = vscode.window.setStatusBarMessage('$(sync~spin) Cursor Fuel…');
-    }
-
-    if (inflight) {
-      return inflight;
+    if (inflightRefresh) {
+      return inflightRefresh;
     }
 
     const generation = refreshGeneration;
-    setRefreshing(true);
+    setRefreshingContext(true);
 
-    inflight = (async () => {
+    const runRefresh = async (): Promise<void> => {
       lastAttemptAt = Date.now();
       const isCurrent = (): boolean => generation === refreshGeneration;
 
-      let apiKey: string | undefined;
-      let vaultFailed = false;
-      try {
-        apiKey = await withTimeout(keys.get(), SECRET_TIMEOUT_MS);
-      } catch {
-        vaultFailed = true;
-      }
-
-      if (!isCurrent()) {
-        return;
-      }
-
-      const email = safeReadEmail();
-      const cached = context.globalState.get(SNAPSHOT_KEY);
-      if (mustForgetSnapshot(cached, email)) {
+      const account = readCachedAccount();
+      const storedSnapshot = context.globalState.get(SNAPSHOT_KEY);
+      if (mustForgetSnapshot(storedSnapshot, account?.email)) {
         void forgetSnapshot();
       }
-      const snapshot = snapshotForAccount(cached, email);
-
-      if (vaultFailed) {
-        provider.setState(blockedState('vault', snapshot));
-        consecutiveFailures += 1;
-        completeAnnounce('error');
-        return;
-      }
-
-      hasApiKey = Boolean(apiKey);
-      if (!apiKey) {
-        provider.setState({ kind: 'needs_key' });
-        consecutiveFailures = 0;
-        completeAnnounce('error');
-        return;
-      }
-
-      if (!email) {
-        provider.setState(blockedState('missing_email'));
-        consecutiveFailures = 0;
-        completeAnnounce('error');
-        return;
-      }
+      const cachedSnapshot = snapshotForAccount(storedSnapshot, account?.email);
 
       if (!isCurrent()) {
         return;
       }
 
-      if (provider.getState().kind !== 'ready') {
-        if (snapshot) {
-          const parsed = Date.parse(snapshot.fetchedAt);
-          lastSuccessAt = Number.isFinite(parsed) ? parsed : undefined;
-          provider.setState({ kind: 'ready', snapshot });
-        } else {
-          provider.setState({ kind: 'loading', email });
+      if (!account) {
+        treeDataProvider.setState(blockedViewState('missing_account'));
+        consecutiveFailures = 0;
+        return;
+      }
+
+      const session = await readSessionCookie();
+      if (!isCurrent()) {
+        return;
+      }
+      if (session.status !== 'ready') {
+        const code = session.status === 'expired' ? 'expired_session' : 'missing_session';
+        treeDataProvider.setState(blockedViewState(code, cachedSnapshot));
+        consecutiveFailures = 0;
+        return;
+      }
+      const cookie = session.value;
+
+      const viewState = treeDataProvider.getState();
+      const showsCachedFailure = viewState.kind === 'error' && viewState.snapshot !== undefined;
+      if (viewState.kind !== 'ready' && !showsCachedFailure) {
+        if (cachedSnapshot) {
+          lastSuccessAt = Date.parse(cachedSnapshot.fetchedAt);
+          treeDataProvider.setState({ kind: 'ready', snapshot: cachedSnapshot });
+        } else if (viewState.kind === 'error') {
+          treeDataProvider.setState({ kind: 'loading' });
         }
       }
 
       try {
-        const fresh = await fetchSpend({ apiKey, email });
+        const freshSnapshot = await fetchUsageSnapshot({ cookie, account });
         if (!isCurrent()) {
           return;
         }
-        await writeSnapshot(fresh);
+        await writeSnapshot(freshSnapshot);
         if (!isCurrent()) {
           return;
         }
         lastSuccessAt = Date.now();
         consecutiveFailures = 0;
-        provider.setState({ kind: 'ready', snapshot: fresh });
-        completeAnnounce('ok');
+        treeDataProvider.setState({ kind: 'ready', snapshot: freshSnapshot });
       } catch (error) {
         if (!isCurrent()) {
           return;
         }
-        consecutiveFailures += 1;
-        provider.setState(toErrorState(error, snapshot));
-        completeAnnounce('error');
+        const nextState = errorViewState(error, cachedSnapshot);
+        consecutiveFailures = blocksPolling(nextState.code) ? 0 : consecutiveFailures + 1;
+        treeDataProvider.setState(nextState);
       }
-    })().finally(() => {
+    };
+
+    inflightRefresh = Promise.resolve(
+      vscode.window.withProgress({ location: { viewId: FuelTreeDataProvider.viewId } }, runRefresh),
+    ).finally(() => {
       if (generation === refreshGeneration) {
-        announceRequested = false;
-        clearAnnounceSpin();
-        inflight = undefined;
-        setRefreshing(false);
-        if (!disposed) {
-          schedule(false);
-        }
+        inflightRefresh = undefined;
+        setRefreshingContext(false);
+        schedulePoll(false);
       }
     });
 
-    return inflight;
+    return inflightRefresh;
   };
 
-  const reportCommandError = (error: unknown): void => {
-    const message = error instanceof Error ? error.message : 'Erreur inattendue.';
-    void vscode.window.showErrorMessage(`Cursor Fuel : ${message}`);
-  };
-
-  const runCommand = (task: () => Promise<void>): void => {
-    void task().catch(reportCommandError);
-  };
-
-  const setApiKey = async (): Promise<void> => {
-    const value = await vscode.window.showInputBox({
-      title: 'Cursor Fuel',
-      prompt: 'Colle la clé d’API d’équipe Cursor',
-      password: true,
-      ignoreFocusOut: true,
-      placeHolder: 'crsr_… ou grok_…',
-    });
-    if (!value?.trim()) {
-      return;
+  const openDashboard = async (): Promise<void> => {
+    try {
+      await vscode.env.openExternal(vscode.Uri.parse(DASHBOARD_URL));
+    } catch {
+      void vscode.window.showErrorMessage('Impossible d’ouvrir cursor.com.');
     }
-    await keys.set(value);
-    hasApiKey = true;
-    consecutiveFailures = 0;
-    invalidateInflight();
-    await refresh({ announce: true });
   };
 
-  const clearApiKey = async (): Promise<void> => {
-    invalidateInflight();
-    if (timer) {
-      clearTimeout(timer);
-      timer = undefined;
-    }
-    await keys.clear();
-    hasApiKey = false;
-    await forgetSnapshot();
-    lastSuccessAt = undefined;
-    lastAttemptAt = undefined;
-    consecutiveFailures = 0;
-    provider.setState({ kind: 'needs_key' });
-  };
-
-  const refreshBecauseFocused = (focused: boolean): boolean => {
-    if (!viewVisible || !focused) {
-      return false;
-    }
-    if (emailMissing()) {
-      return true;
-    }
+  const shouldRefreshNow = (windowFocused: boolean): boolean => {
+    const state = treeDataProvider.getState();
     return shouldRefreshOnFocus({
       now: Date.now(),
-      viewVisible,
-      windowFocused: focused,
+      windowFocused,
       ...(lastSuccessAt !== undefined ? { lastSuccessAt } : {}),
+      ...(state.kind === 'error' && blocksPolling(state.code) ? { blockedCode: state.code } : {}),
     });
   };
 
-  const treeView = vscode.window.createTreeView(FuelViewProvider.viewType, {
-    treeDataProvider: provider,
-    showCollapseAll: false,
+  const treeView = vscode.window.createTreeView(FuelTreeDataProvider.viewId, {
+    treeDataProvider,
   });
-  provider.attach(treeView);
+  treeDataProvider.attach(treeView);
 
   context.subscriptions.push(
     treeView,
-    provider,
+    treeDataProvider,
     treeView.onDidChangeVisibility((event) => {
-      viewVisible = event.visible;
-      if (refreshBecauseFocused(vscode.window.state.focused)) {
-        schedule(true);
-        return;
+      if (event.visible) {
+        schedulePoll(shouldRefreshNow(vscode.window.state.focused));
       }
-      schedule(false);
     }),
-    vscode.commands.registerCommand('fuel.refresh', () =>
-      runCommand(() => refresh({ announce: true })),
-    ),
-    vscode.commands.registerCommand('fuel.setApiKey', () => runCommand(setApiKey)),
-    vscode.commands.registerCommand('fuel.clearApiKey', () => runCommand(clearApiKey)),
-    vscode.window.onDidChangeWindowState((state) => {
-      if (refreshBecauseFocused(state.focused)) {
-        schedule(true);
-        return;
-      }
-      schedule(false);
+    vscode.window.onDidChangeWindowState((windowState) => {
+      schedulePoll(shouldRefreshNow(windowState.focused));
     }),
+    vscode.commands.registerCommand('fuel.refresh', refresh),
+    vscode.commands.registerCommand('fuel.openDashboard', openDashboard),
     {
       dispose() {
         disposed = true;
-        invalidateInflight();
-        if (timer) {
-          clearTimeout(timer);
-          timer = undefined;
-        }
+        cancelInflightRefresh();
+        clearPollTimer();
       },
     },
   );
 
-  viewVisible = treeView.visible;
-  setRefreshing(false);
-  void refresh().catch(reportCommandError);
+  setRefreshingContext(false);
+  void refresh();
 }
 
 export function deactivate(): void {}
 
-function safeReadEmail(): string | undefined {
-  try {
-    return readCachedEmail();
-  } catch {
-    return undefined;
-  }
-}
-
-const BLOCKED_MESSAGE = {
-  vault: 'Impossible de lire la clé d’API dans le coffre Cursor.',
-  missing_email: 'Connecte-toi à Cursor pour retrouver ton e-mail local.',
+const BLOCKED_MESSAGES = {
+  missing_account: 'Aucun compte Cursor connecté. Connecte-toi dans Cursor.',
+  missing_session:
+    'Session Cursor illisible. Autorise le trousseau « Cursor Safe Storage », puis Rafraîchir.',
+  expired_session: 'Session Cursor expirée. Reviens sur cette fenêtre pour réessayer.',
 } as const;
 
-function blockedState(code: keyof typeof BLOCKED_MESSAGE, snapshot?: SpendSnapshot): ViewState {
+function blockedViewState(
+  code: keyof typeof BLOCKED_MESSAGES,
+  cachedSnapshot?: UsageSnapshot,
+): ViewState {
   return {
     kind: 'error',
     code,
-    message: BLOCKED_MESSAGE[code],
-    ...(snapshot ? { snapshot } : {}),
+    message: BLOCKED_MESSAGES[code],
+    ...(cachedSnapshot ? { snapshot: cachedSnapshot } : {}),
   };
 }
 
-function toErrorState(error: unknown, snapshot: SpendSnapshot | undefined): ViewState {
-  if (error instanceof UsageError) {
-    return {
-      kind: 'error',
-      code: error.code,
-      message: error.message,
-      ...(snapshot ? { snapshot } : {}),
-    };
-  }
+function errorViewState(
+  error: unknown,
+  cachedSnapshot: UsageSnapshot | undefined,
+): Extract<ViewState, { kind: 'error' }> {
+  const { code, message } =
+    error instanceof UsageError
+      ? error
+      : { code: 'unexpected' as const, message: 'Erreur inattendue. Nouvel essai automatique.' };
   return {
     kind: 'error',
-    code: 'network',
-    message: 'Impossible de récupérer la dépense.',
-    ...(snapshot ? { snapshot } : {}),
+    code,
+    message,
+    ...(cachedSnapshot ? { snapshot: cachedSnapshot } : {}),
   };
 }

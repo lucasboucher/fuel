@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!!**/dist", "!!**/*.vsix", "!!**/media"]
+    "includes": ["**", "!!**/dist", "!!**/out", "!!**/*.vsix", "!!**/media"]
   },
   "formatter": {
     "enabled": true,

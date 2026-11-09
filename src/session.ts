@@ -1,80 +1,202 @@
+import { execFile } from 'node:child_process';
+import { createDecipheriv, pbkdf2Sync } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { ExtensionContext, SecretStorage } from 'vscode';
 
-const API_KEY_SECRET = 'fuel.apiKey';
-const EMAIL_KEY = 'cursorAuth/cachedEmail';
+const STATE_DB_PATH = join(
+  homedir(),
+  'Library',
+  'Application Support',
+  'Cursor',
+  'User',
+  'globalStorage',
+  'state.vscdb',
+);
+const CACHED_EMAIL_KEY = 'cursorAuth/cachedEmail';
+const CACHED_PROFILE_KEY = 'cursorAuth/cachedScopedProfile';
+const CACHED_TEAM_KEY = 'cursorAuth/cachedTeam';
+const ACCESS_TOKEN_KEY = 'cursorAuth/accessToken';
+const SAFE_STORAGE_PREFIX = 'cursor-safe-storage:v1:';
+const CHROMIUM_V10_PREFIX = 'v10';
+const CHROMIUM_SALT = 'saltysalt';
+const CHROMIUM_ITERATIONS = 1003;
+const KEYCHAIN_TIMEOUT_MS = 20_000;
+const TOKEN_EXPIRY_MARGIN_SECONDS = 60;
 
-export function stateDbPath(home = homedir(), platform = process.platform): string {
-  if (platform === 'darwin') {
-    return join(
-      home,
-      'Library',
-      'Application Support',
-      'Cursor',
-      'User',
-      'globalStorage',
-      'state.vscdb',
-    );
+export type CursorAccount = {
+  email: string;
+  displayName: string;
+  teamName: string;
+};
+
+export function parseCursorAccount(
+  email: string | undefined,
+  profileJson: string | undefined,
+  teamJson: string | undefined,
+): CursorAccount | undefined {
+  const trimmedEmail = email?.trim();
+  const displayName = jsonText(profileJson, 'displayName');
+  const teamName = jsonText(teamJson, 'name');
+  if (!trimmedEmail || !displayName || !teamName) {
+    return undefined;
   }
-  if (platform === 'win32') {
-    const appData = process.env.APPDATA ?? join(home, 'AppData', 'Roaming');
-    return join(appData, 'Cursor', 'User', 'globalStorage', 'state.vscdb');
-  }
-  return join(home, '.config', 'Cursor', 'User', 'globalStorage', 'state.vscdb');
+  return { email: trimmedEmail, displayName, teamName };
 }
 
-export function readCachedEmail(dbPath = stateDbPath()): string | undefined {
-  const db = new DatabaseSync(dbPath, { readOnly: true, timeout: 1_000 });
+export function readCachedAccount(): CursorAccount | undefined {
   try {
-    const row = db.prepare('SELECT value FROM ItemTable WHERE key = ?').get(EMAIL_KEY) as
-      | { value: string | Uint8Array }
-      | undefined;
-    if (!row) {
+    return parseCursorAccount(
+      readStateItem(CACHED_EMAIL_KEY),
+      readStateItem(CACHED_PROFILE_KEY),
+      readStateItem(CACHED_TEAM_KEY),
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+export type SessionCookie =
+  | { status: 'ready'; value: string }
+  | { status: 'missing' }
+  | { status: 'expired' };
+
+export async function readSessionCookie(): Promise<SessionCookie> {
+  const read = await readAccessToken();
+  if (read.status !== 'ready') {
+    return read;
+  }
+  const value = buildSessionCookie(read.accessToken);
+  return value ? { status: 'ready', value } : { status: 'missing' };
+}
+
+export function decryptAccessToken(sealed: string, password: string): string | undefined {
+  if (!sealed.startsWith(SAFE_STORAGE_PREFIX)) {
+    return undefined;
+  }
+  try {
+    const decoded = Buffer.from(sealed.slice(SAFE_STORAGE_PREFIX.length), 'base64');
+    if (decoded.subarray(0, CHROMIUM_V10_PREFIX.length).toString('utf8') !== CHROMIUM_V10_PREFIX) {
       return undefined;
     }
-    const value =
-      typeof row.value === 'string' ? row.value : Buffer.from(row.value).toString('utf8');
-    const email = value.trim();
-    return email.length > 0 ? email : undefined;
+    const key = pbkdf2Sync(password, CHROMIUM_SALT, CHROMIUM_ITERATIONS, 16, 'sha1');
+    const decipher = createDecipheriv('aes-128-cbc', key, Buffer.alloc(16, ' '));
+    const accessToken = Buffer.concat([
+      decipher.update(decoded.subarray(CHROMIUM_V10_PREFIX.length)),
+      decipher.final(),
+    ]).toString('utf8');
+    return decodeJwtPayload(accessToken) ? accessToken : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function buildSessionCookie(accessToken: string): string | undefined {
+  const userId = decodeJwtPayload(accessToken)?.sub;
+  if (typeof userId !== 'string' || userId.trim().length === 0) {
+    return undefined;
+  }
+  return `WorkosCursorSessionToken=${encodeURIComponent(`${userId}::${accessToken}`)}`;
+}
+
+let accessTokenCache: { sealed: string; accessToken: string } | undefined;
+
+type AccessTokenRead = { status: 'ready'; accessToken: string } | { status: 'missing' | 'expired' };
+
+async function readAccessToken(): Promise<AccessTokenRead> {
+  let sealed: string | undefined;
+  try {
+    sealed = readStateItem(ACCESS_TOKEN_KEY);
+  } catch {
+    return { status: 'missing' };
+  }
+  if (!sealed) {
+    return { status: 'missing' };
+  }
+  // Each decrypt can raise a Keychain prompt.
+  if (accessTokenCache?.sealed === sealed && isJwtUnexpired(accessTokenCache.accessToken)) {
+    return { status: 'ready', accessToken: accessTokenCache.accessToken };
+  }
+  const password = await readSafeStoragePassword();
+  const accessToken = password ? decryptAccessToken(sealed, password) : undefined;
+  if (!accessToken) {
+    return { status: 'missing' };
+  }
+  if (!isJwtUnexpired(accessToken)) {
+    return { status: 'expired' };
+  }
+  accessTokenCache = { sealed, accessToken };
+  return { status: 'ready', accessToken };
+}
+
+function readStateItem(key: string): string | undefined {
+  const db = new DatabaseSync(STATE_DB_PATH, { readOnly: true, timeout: 1_000 });
+  try {
+    const row = db.prepare('SELECT value FROM ItemTable WHERE key = ?').get(key) as
+      | { value: string }
+      | undefined;
+    const value = row?.value.trim();
+    return value ? value : undefined;
   } finally {
     db.close();
   }
 }
 
-export async function withTimeout<T>(promise: Thenable<T> | Promise<T>, ms: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
+function jsonText(value: string | undefined, field: string): string | undefined {
+  if (!value) {
+    return undefined;
+  }
   try {
-    return await Promise.race([
-      Promise.resolve(promise),
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`Timed out after ${ms}ms`)), ms);
-      }),
-    ]);
-  } finally {
-    if (timer) {
-      clearTimeout(timer);
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== 'object') {
+      return undefined;
     }
+    const text = (parsed as Record<string, unknown>)[field];
+    return typeof text === 'string' && text.trim().length > 0 ? text.trim() : undefined;
+  } catch {
+    return undefined;
   }
 }
 
-export class ApiKeyStore {
-  constructor(private readonly secrets: SecretStorage) {}
+function readSafeStoragePassword(): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    execFile(
+      '/usr/bin/security',
+      ['find-generic-password', '-s', 'Cursor Safe Storage', '-a', 'Cursor Key', '-w'],
+      { encoding: 'utf8', timeout: KEYCHAIN_TIMEOUT_MS },
+      (error: Error | null, stdout: string) => {
+        if (error) {
+          resolve(undefined);
+          return;
+        }
+        const password = stdout.trim();
+        resolve(password.length > 0 ? password : undefined);
+      },
+    );
+  });
+}
 
-  static fromContext(context: ExtensionContext): ApiKeyStore {
-    return new ApiKeyStore(context.secrets);
+function isJwtUnexpired(token: string): boolean {
+  const expiresAt = decodeJwtPayload(token)?.exp;
+  return (
+    typeof expiresAt === 'number' &&
+    Number.isFinite(expiresAt) &&
+    expiresAt > Date.now() / 1000 + TOKEN_EXPIRY_MARGIN_SECONDS
+  );
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> | undefined {
+  const parts = token.split('.');
+  if (parts.length !== 3 || !parts[1]) {
+    return undefined;
   }
-
-  get(): Thenable<string | undefined> {
-    return this.secrets.get(API_KEY_SECRET);
-  }
-
-  set(value: string): Thenable<void> {
-    return this.secrets.store(API_KEY_SECRET, value.trim());
-  }
-
-  clear(): Thenable<void> {
-    return this.secrets.delete(API_KEY_SECRET);
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as unknown;
+    if (!payload || typeof payload !== 'object') {
+      return undefined;
+    }
+    return payload as Record<string, unknown>;
+  } catch {
+    return undefined;
   }
 }

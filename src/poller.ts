@@ -1,15 +1,16 @@
-export const VISIBLE_INTERVAL_MS = 15 * 60_000;
-export const STALE_AFTER_MS = 15 * 60_000;
-export const MAX_BACKOFF_MS = 15 * 60_000;
+import type { UsageErrorCode } from './usage.js';
+
+export const POLL_INTERVAL_MS = 5 * 60_000;
+export const STALE_AFTER_MS = 5 * 60_000;
+const MAX_BACKOFF_MS = 15 * 60_000;
 
 export type PollDecision =
-  | { action: 'fetch' }
+  | { action: 'refresh' }
   | { action: 'wait'; delayMs: number }
   | { action: 'idle' };
 
 export type PollInput = {
   now: number;
-  viewVisible: boolean;
   windowFocused: boolean;
   lastSuccessAt?: number;
   lastAttemptAt?: number;
@@ -17,51 +18,61 @@ export type PollInput = {
   manual?: boolean;
 };
 
-export function backoffMs(consecutiveFailures: number): number {
+function backoffDelayMs(consecutiveFailures: number): number {
   return Math.min(MAX_BACKOFF_MS, 60_000 * 2 ** (consecutiveFailures - 1));
 }
 
-export function nextPoll(input: PollInput): PollDecision {
+export function decideNextPoll(input: PollInput): PollDecision {
   if (input.manual) {
-    return { action: 'fetch' };
+    return { action: 'refresh' };
   }
 
-  if (!input.windowFocused || !input.viewVisible) {
+  if (!input.windowFocused) {
     return { action: 'idle' };
   }
 
   if (input.consecutiveFailures > 0) {
-    const delayMs = backoffMs(input.consecutiveFailures);
+    const delayMs = backoffDelayMs(input.consecutiveFailures);
     if (input.lastAttemptAt === undefined) {
-      return { action: 'fetch' };
+      return { action: 'refresh' };
     }
     const elapsed = input.now - input.lastAttemptAt;
     if (elapsed < delayMs) {
       return { action: 'wait', delayMs: delayMs - elapsed };
     }
-    return { action: 'fetch' };
+    return { action: 'refresh' };
   }
 
   if (input.lastSuccessAt === undefined) {
-    return { action: 'fetch' };
+    return { action: 'refresh' };
   }
 
   const age = input.now - input.lastSuccessAt;
   if (age >= STALE_AFTER_MS) {
-    return { action: 'fetch' };
+    return { action: 'refresh' };
   }
 
-  return { action: 'wait', delayMs: VISIBLE_INTERVAL_MS - age };
+  return { action: 'wait', delayMs: POLL_INTERVAL_MS - age };
 }
 
 export function shouldRefreshOnFocus(input: {
   now: number;
   lastSuccessAt?: number;
-  viewVisible: boolean;
   windowFocused: boolean;
+  blockedCode?: UsageErrorCode;
 }): boolean {
-  if (!input.viewVisible || !input.windowFocused) {
+  if (!input.windowFocused) {
     return false;
+  }
+  if (input.blockedCode === 'missing_session') {
+    return false;
+  }
+  if (
+    input.blockedCode === 'missing_account' ||
+    input.blockedCode === 'expired_session' ||
+    input.blockedCode === 'unauthorized'
+  ) {
+    return true;
   }
   if (input.lastSuccessAt === undefined) {
     return true;

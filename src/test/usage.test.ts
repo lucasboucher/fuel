@@ -1,261 +1,145 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  fetchSpend,
-  isSpendSnapshot,
+  blocksPolling,
+  fetchUsageSnapshot,
+  isUsageSnapshot,
   mustForgetSnapshot,
-  normalizeSpend,
   snapshotForAccount,
+  snapshotFromSummary,
   UsageError,
+  type UsageSnapshot,
 } from '../usage.js';
 
-test('isSpendSnapshot accepts current snapshots and rejects legacy euro fields', () => {
-  assert.equal(
-    isSpendSnapshot({
-      email: 'ada@example.com',
-      overallSpendDollars: 1,
-      includedSpendDollars: 1,
-      onDemandSpendDollars: 0,
-      fetchedAt: '2026-11-09T12:00:00.000Z',
-    }),
-    true,
-  );
-  assert.equal(
-    isSpendSnapshot({
-      email: 'ada@example.com',
-      overallSpendEuros: 1,
-      includedSpendEuros: 1,
-      onDemandSpendEuros: 0,
-      fetchedAt: '2026-11-09T12:00:00.000Z',
-    }),
-    false,
-  );
+const measuredSummary = {
+  billingCycleStart: '2026-10-11T09:38:09.000Z',
+  billingCycleEnd: '2026-11-11T09:38:09.000Z',
+  individualUsage: {
+    plan: {
+      autoPercentUsed: 50.01428571428571,
+      apiPercentUsed: 26.43,
+      totalPercentUsed: 46.2408,
+      breakdown: { included: 2000, bonus: 56177, total: 58177 },
+    },
+    onDemand: { enabled: true, used: 0, limit: null, remaining: null },
+  },
+  teamUsage: {
+    onDemand: { enabled: true, used: 0, limit: 200, remaining: 200 },
+  },
+};
+
+const adaAccount = {
+  email: 'Ada@Example.com',
+  displayName: 'Ada Lovelace',
+  teamName: 'Analytical',
+};
+
+const adaSnapshot: UsageSnapshot = snapshotFromSummary(
+  measuredSummary,
+  adaAccount,
+  '2026-11-09T12:00:00.000Z',
+);
+
+test('isUsageSnapshot accepts complete snapshots only', () => {
+  assert.equal(isUsageSnapshot(adaSnapshot), true);
+  const { cycleStart: _, ...partial } = adaSnapshot;
+  const { displayName: __, ...anonymous } = adaSnapshot;
+  assert.equal(isUsageSnapshot(partial), false);
+  assert.equal(isUsageSnapshot(anonymous), false);
 });
 
 test('keeps the signed-in snapshot and marks the others for deletion', () => {
-  const ada = {
-    email: 'Ada@Example.com',
-    overallSpendDollars: 1,
-    includedSpendDollars: 1,
-    onDemandSpendDollars: 0,
-    fetchedAt: '2026-11-09T12:00:00.000Z',
-  };
-  assert.equal(snapshotForAccount(ada, 'ada@example.com'), ada);
-  assert.equal(snapshotForAccount(ada, 'other@example.com'), undefined);
-  assert.equal(snapshotForAccount(ada, undefined), undefined);
+  assert.equal(snapshotForAccount(adaSnapshot, 'ada@example.com'), adaSnapshot);
+  assert.equal(snapshotForAccount(adaSnapshot, 'other@example.com'), undefined);
+  assert.equal(snapshotForAccount(adaSnapshot, undefined), undefined);
   assert.equal(mustForgetSnapshot(undefined, 'ada@example.com'), false);
-  assert.equal(mustForgetSnapshot(ada, undefined), false);
-  assert.equal(mustForgetSnapshot(ada, 'ada@example.com'), false);
-  assert.equal(mustForgetSnapshot(ada, 'other@example.com'), true);
+  assert.equal(mustForgetSnapshot(adaSnapshot, undefined), false);
+  assert.equal(mustForgetSnapshot(adaSnapshot, 'ada@example.com'), false);
+  assert.equal(mustForgetSnapshot(adaSnapshot, 'other@example.com'), true);
   assert.equal(mustForgetSnapshot({ email: 'ada@example.com' }, 'ada@example.com'), true);
 });
 
-test('normalizes spend and computes percent used', () => {
-  const snapshot = normalizeSpend(
+test('reads identity, spend, percents, cycle dates, and the team limit', () => {
+  assert.equal(adaSnapshot.displayName, 'Ada Lovelace');
+  assert.equal(adaSnapshot.teamName, 'Analytical');
+  assert.equal(adaSnapshot.overallSpendDollars, 581.77);
+  assert.equal(adaSnapshot.includedSpendDollars, 581.77);
+  assert.equal(adaSnapshot.onDemandSpendDollars, 0);
+  assert.equal(adaSnapshot.teamOnDemandEnabled, true);
+  assert.equal(adaSnapshot.teamSpendLimitDollars, 2);
+  assert.equal(adaSnapshot.cursorModelsPercentUsed, 50);
+  assert.equal(adaSnapshot.otherModelsPercentUsed, 26.4);
+  assert.equal(adaSnapshot.totalPercentUsed, 46.2);
+  assert.equal(adaSnapshot.cycleStart, '2026-10-11T09:38:09.000Z');
+  assert.equal(adaSnapshot.cycleEnd, '2026-11-11T09:38:09.000Z');
+});
+
+test('adds on-demand to the overall spend and keeps a null team limit', () => {
+  const snapshot = snapshotFromSummary(
     {
-      subscriptionCycleStart: Date.UTC(2026, 10, 1),
-      teamMemberSpend: [
-        {
-          email: 'ada@example.com',
-          name: 'Ada',
-          overallSpendCents: 12345,
-          spendCents: 2000,
-          effectivePerUserLimitDollars: 200,
-        },
-      ],
+      ...measuredSummary,
+      individualUsage: { ...measuredSummary.individualUsage, onDemand: { used: 50 } },
+      teamUsage: { onDemand: { enabled: false, limit: null } },
     },
-    'ada@example.com',
+    adaAccount,
     '2026-11-09T12:00:00.000Z',
   );
 
-  assert.equal(snapshot.overallSpendDollars, 123.45);
-  assert.equal(snapshot.includedSpendDollars, 103.45);
-  assert.equal(snapshot.onDemandSpendDollars, 20);
-  assert.equal(snapshot.limitDollars, 200);
-  assert.equal(snapshot.percentUsed, 61.7);
-  assert.equal(snapshot.cycleStart, '2026-11-01T00:00:00.000Z');
-  assert.equal(snapshot.name, 'Ada');
+  assert.equal(snapshot.teamOnDemandEnabled, false);
+  assert.equal(snapshot.onDemandSpendDollars, 0.5);
+  assert.equal(snapshot.overallSpendDollars, 582.27);
+  assert.equal(snapshot.teamSpendLimitDollars, null);
 });
 
-test('normalizes included pools and percent fields', () => {
-  const snapshot = normalizeSpend(
-    {
-      teamMemberSpend: [
-        {
-          email: 'ada@example.com',
-          includedSpendCents: 8429,
-          spendCents: 0,
-          autoPercentUsed: 46.2,
-          apiPercentUsed: 12.4,
-          totalPercentUsed: 31.1,
-        },
-      ],
-    },
-    'ada@example.com',
-    '2026-11-09T12:00:00.000Z',
+test('rejects a measuredSummary with a missing field', () => {
+  const { billingCycleEnd: _, ...partial } = measuredSummary;
+  const { teamUsage: __, ...individualOnly } = measuredSummary;
+  assert.throws(
+    () => snapshotFromSummary(partial, adaAccount, 'now'),
+    (error: unknown) => error instanceof UsageError && error.code === 'unreadable',
   );
-
-  assert.equal(snapshot.includedSpendDollars, 84.29);
-  assert.equal(snapshot.onDemandSpendDollars, 0);
-  assert.equal(snapshot.overallSpendDollars, 84.29);
-  assert.equal(snapshot.cursorModelsPercent, 46.2);
-  assert.equal(snapshot.otherModelsPercent, 12.4);
-  assert.equal(snapshot.totalPercentUsed, 31.1);
-});
-
-test('keeps fractional cent precision when converting to dollars', () => {
-  const snapshot = normalizeSpend(
-    {
-      teamMemberSpend: [
-        {
-          email: 'ada@example.com',
-          spendCents: 2450.125487,
-          includedSpendCents: 100.004,
-        },
-      ],
-    },
-    'ada@example.com',
-    '2026-11-09T12:00:00.000Z',
+  assert.throws(
+    () => snapshotFromSummary(individualOnly, adaAccount, 'now'),
+    (error: unknown) => error instanceof UsageError && error.code === 'unreadable',
   );
-
-  assert.equal(snapshot.onDemandSpendDollars, 24.5);
-  assert.equal(snapshot.includedSpendDollars, 1);
-  assert.equal(snapshot.overallSpendDollars, 25.5);
-});
-
-test('matches the member row case-insensitively by email', () => {
-  const snapshot = normalizeSpend(
-    {
-      teamMemberSpend: [
-        { email: 'other@example.com', overallSpendCents: 1 },
-        { email: 'Ada@Example.com', overallSpendCents: 500 },
-      ],
-    },
-    'ada@example.com',
-    '2026-11-09T12:00:00.000Z',
+  assert.throws(
+    () => snapshotFromSummary({ ...measuredSummary, teamUsage: {} }, adaAccount, 'now'),
+    (error: unknown) => error instanceof UsageError && error.code === 'unreadable',
   );
-
-  assert.equal(snapshot.overallSpendDollars, 5);
-});
-
-test('rejects a lone member row that does not match the signed-in email', () => {
   assert.throws(
     () =>
-      normalizeSpend(
-        {
-          teamMemberSpend: [{ overallSpendCents: 250, spendCents: 50 }],
-        },
-        'ada@example.com',
-        '2026-11-09T12:00:00.000Z',
+      snapshotFromSummary(
+        { ...measuredSummary, teamUsage: { onDemand: { enabled: true } } },
+        adaAccount,
+        'now',
       ),
-    (error: unknown) => error instanceof UsageError && error.code === 'not_found',
+    (error: unknown) => error instanceof UsageError && error.code === 'unreadable',
   );
 });
 
-test('derives included spend by subtracting cents before rounding to dollars', () => {
-  const snapshot = normalizeSpend(
-    {
-      teamMemberSpend: [
-        {
-          email: 'ada@example.com',
-          overallSpendCents: 2.5,
-          spendCents: 1.4,
-        },
-      ],
-    },
-    'ada@example.com',
-    '2026-11-09T12:00:00.000Z',
-  );
-
-  // Rounding each side first would yield $0.02 included; subtract-then-round yields $0.01.
-  assert.equal(snapshot.overallSpendDollars, 0.03);
-  assert.equal(snapshot.onDemandSpendDollars, 0.01);
-  assert.equal(snapshot.includedSpendDollars, 0.01);
+test('stops polling only when retrying cannot succeed', () => {
+  assert.equal(blocksPolling('missing_account'), true);
+  assert.equal(blocksPolling('missing_session'), true);
+  assert.equal(blocksPolling('expired_session'), true);
+  assert.equal(blocksPolling('unauthorized'), true);
+  assert.equal(blocksPolling('network'), false);
+  assert.equal(blocksPolling('http_status'), false);
+  assert.equal(blocksPolling('unreadable'), false);
+  assert.equal(blocksPolling('unexpected'), false);
 });
 
-test('ignores non-finite subscriptionCycleStart', () => {
-  const snapshot = normalizeSpend(
-    {
-      subscriptionCycleStart: Number.NaN,
-      teamMemberSpend: [{ email: 'ada@example.com', includedSpendCents: 100, spendCents: 0 }],
-    },
-    'ada@example.com',
-    '2026-11-09T12:00:00.000Z',
-  );
-
-  assert.equal(snapshot.cycleStart, undefined);
-});
-
-test('throws when no matching member is found', () => {
-  assert.throws(
-    () =>
-      normalizeSpend(
-        {
-          teamMemberSpend: [
-            { email: 'a@example.com', overallSpendCents: 1 },
-            { email: 'b@example.com', overallSpendCents: 2 },
-          ],
-        },
-        'ada@example.com',
-        '2026-11-09T12:00:00.000Z',
-      ),
-    (error: unknown) => error instanceof UsageError && error.code === 'not_found',
-  );
-});
-
-test('fetchSpend retries grok_ keys with Bearer after Basic 401', async () => {
-  const modes: string[] = [];
-  const fetchImpl: typeof fetch = async (_input, init) => {
-    const authorization = String(
-      init && typeof init === 'object' && 'headers' in init
-        ? (init.headers as Record<string, string>).Authorization
-        : '',
-    );
-    if (authorization.startsWith('Basic ')) {
-      modes.push('basic');
-      return new Response(JSON.stringify({ message: 'unauthorized' }), {
-        status: 401,
-      });
-    }
-    modes.push('bearer');
-    return new Response(
-      JSON.stringify({
-        teamMemberSpend: [{ email: 'ada@example.com', includedSpendCents: 100, spendCents: 0 }],
-      }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
-    );
-  };
-
-  const snapshot = await fetchSpend({
-    apiKey: 'grok_test',
-    email: 'ada@example.com',
-    fetchImpl,
-  });
-
-  assert.deepEqual(modes, ['basic', 'bearer']);
-  assert.equal(snapshot.includedSpendDollars, 1);
-});
-
-test('fetchSpend maps 401 to unauthorized without Bearer retry for crsr_ keys', async () => {
-  let calls = 0;
-  const fetchImpl: typeof fetch = async () => {
-    calls += 1;
-    return new Response(JSON.stringify({ message: 'nope' }), { status: 401 });
-  };
-
+test('fetchUsageSnapshot maps 401 to an expired session', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => new Response('nope', { status: 401 }));
   await assert.rejects(
-    () => fetchSpend({ apiKey: 'crsr_test', email: 'ada@example.com', fetchImpl }),
+    () => fetchUsageSnapshot({ cookie: 'WorkosCursorSessionToken=x', account: adaAccount }),
     (error: unknown) => error instanceof UsageError && error.code === 'unauthorized',
   );
-  assert.equal(calls, 1);
 });
 
-test('fetchSpend maps 403 to forbidden', async () => {
-  const fetchImpl: typeof fetch = async () =>
-    new Response(JSON.stringify({ error: 'blocked' }), { status: 403 });
-
+test('fetchUsageSnapshot maps other HTTP failures to http_status', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => new Response('down', { status: 503 }));
   await assert.rejects(
-    () => fetchSpend({ apiKey: 'crsr_test', email: 'ada@example.com', fetchImpl }),
-    (error: unknown) => error instanceof UsageError && error.code === 'forbidden',
+    () => fetchUsageSnapshot({ cookie: 'WorkosCursorSessionToken=x', account: adaAccount }),
+    (error: unknown) => error instanceof UsageError && error.code === 'http_status',
   );
 });

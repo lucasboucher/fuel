@@ -1,74 +1,63 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { nextPoll, STALE_AFTER_MS, shouldRefreshOnFocus, VISIBLE_INTERVAL_MS } from '../poller.js';
+import {
+  decideNextPoll,
+  POLL_INTERVAL_MS,
+  STALE_AFTER_MS,
+  shouldRefreshOnFocus,
+} from '../poller.js';
 
-test('fetches immediately on the first pass', () => {
-  const decision = nextPoll({
+test('refreshes immediately on the first pass', () => {
+  const decision = decideNextPoll({
     now: 1_000,
-    viewVisible: true,
     windowFocused: true,
     consecutiveFailures: 0,
   });
-  assert.deepEqual(decision, { action: 'fetch' });
+  assert.deepEqual(decision, { action: 'refresh' });
 });
 
 test('waits while the snapshot is fresh', () => {
-  const decision = nextPoll({
+  const decision = decideNextPoll({
     now: 10_000,
-    viewVisible: true,
     windowFocused: true,
     lastSuccessAt: 10_000 - 60_000,
     consecutiveFailures: 0,
   });
-  assert.deepEqual(decision, { action: 'wait', delayMs: VISIBLE_INTERVAL_MS - 60_000 });
+  assert.deepEqual(decision, { action: 'wait', delayMs: POLL_INTERVAL_MS - 60_000 });
 });
 
-test('fetches when the snapshot is stale', () => {
-  const decision = nextPoll({
+test('refreshes when the snapshot is stale', () => {
+  const decision = decideNextPoll({
     now: STALE_AFTER_MS + 5,
-    viewVisible: true,
     windowFocused: true,
     lastSuccessAt: 0,
     consecutiveFailures: 0,
   });
-  assert.deepEqual(decision, { action: 'fetch' });
+  assert.deepEqual(decision, { action: 'refresh' });
 });
 
 test('stays idle when the window is unfocused', () => {
-  const decision = nextPoll({
+  const decision = decideNextPoll({
     now: 1_000,
-    viewVisible: true,
     windowFocused: false,
-    consecutiveFailures: 0,
-  });
-  assert.deepEqual(decision, { action: 'idle' });
-});
-
-test('stays idle when the view is hidden', () => {
-  const decision = nextPoll({
-    now: 1_000,
-    viewVisible: false,
-    windowFocused: true,
     consecutiveFailures: 0,
   });
   assert.deepEqual(decision, { action: 'idle' });
 });
 
 test('honors a manual refresh', () => {
-  const decision = nextPoll({
+  const decision = decideNextPoll({
     now: 1_000,
-    viewVisible: false,
     windowFocused: false,
     consecutiveFailures: 3,
     manual: true,
   });
-  assert.deepEqual(decision, { action: 'fetch' });
+  assert.deepEqual(decision, { action: 'refresh' });
 });
 
 test('backs off after an error', () => {
-  const decision = nextPoll({
+  const decision = decideNextPoll({
     now: 30_000,
-    viewVisible: true,
     windowFocused: true,
     lastAttemptAt: 0,
     consecutiveFailures: 2,
@@ -77,14 +66,25 @@ test('backs off after an error', () => {
 });
 
 test('retries when the backoff has elapsed', () => {
-  const decision = nextPoll({
+  const decision = decideNextPoll({
     now: 120_000,
-    viewVisible: true,
     windowFocused: true,
     lastAttemptAt: 0,
     consecutiveFailures: 2,
   });
-  assert.deepEqual(decision, { action: 'fetch' });
+  assert.deepEqual(decision, { action: 'refresh' });
+});
+
+test('retries a blocked state on focus, except a missing session', () => {
+  const focused = { now: 1_000, lastSuccessAt: 1_000, windowFocused: true };
+  assert.equal(shouldRefreshOnFocus({ ...focused, blockedCode: 'missing_account' }), true);
+  assert.equal(shouldRefreshOnFocus({ ...focused, blockedCode: 'expired_session' }), true);
+  assert.equal(shouldRefreshOnFocus({ ...focused, blockedCode: 'unauthorized' }), true);
+  assert.equal(shouldRefreshOnFocus({ ...focused, blockedCode: 'missing_session' }), false);
+  assert.equal(
+    shouldRefreshOnFocus({ ...focused, windowFocused: false, blockedCode: 'unauthorized' }),
+    false,
+  );
 });
 
 test('refreshes on focus return when the snapshot is stale', () => {
@@ -92,7 +92,6 @@ test('refreshes on focus return when the snapshot is stale', () => {
     shouldRefreshOnFocus({
       now: STALE_AFTER_MS + 1,
       lastSuccessAt: 0,
-      viewVisible: true,
       windowFocused: true,
     }),
     true,
@@ -101,7 +100,6 @@ test('refreshes on focus return when the snapshot is stale', () => {
     shouldRefreshOnFocus({
       now: 1_000,
       lastSuccessAt: 0,
-      viewVisible: true,
       windowFocused: true,
     }),
     false,
