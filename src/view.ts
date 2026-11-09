@@ -22,7 +22,7 @@ export class FuelViewProvider implements vscode.TreeDataProvider<FuelItem>, vsco
   >();
   readonly onDidChangeTreeData = this.onDidChangeTreeDataEmitter.event;
 
-  private state: ViewState = { kind: 'needs_key' };
+  private state: ViewState = { kind: 'loading' };
   private treeView?: vscode.TreeView<FuelItem>;
   attach(treeView: vscode.TreeView<FuelItem>): void {
     this.treeView = treeView;
@@ -197,28 +197,28 @@ function snapshotRoots(snapshot: SpendSnapshot, nested: boolean): FuelItem[] {
     {
       id: 'included',
       label: 'Dépense incluse',
-      description: formatEuros(snapshot.includedSpendEuros),
+      description: formatDollars(snapshot.includedSpendDollars),
       icon: new vscode.ThemeIcon('credit-card'),
     },
     {
       id: 'ondemand',
       label: 'À la demande',
-      description: formatEuros(snapshot.onDemandSpendEuros),
+      description: formatDollars(snapshot.onDemandSpendDollars),
       icon: new vscode.ThemeIcon('flame'),
     },
   ];
 
-  if (snapshot.limitEuros !== undefined) {
+  if (snapshot.limitDollars !== undefined) {
     spendChildren.push(
       {
         id: 'limit',
         label: 'Limite',
-        description: formatEuros(snapshot.limitEuros),
+        description: formatDollars(snapshot.limitDollars),
         icon: new vscode.ThemeIcon('target'),
       },
       {
         id: 'used',
-        label: 'Utilisé (limite €)',
+        label: 'Utilisé (limite $)',
         description: formatPercent(snapshot.percentUsed),
         icon: new vscode.ThemeIcon('pie-chart'),
       },
@@ -280,10 +280,10 @@ function snapshotRoots(snapshot: SpendSnapshot, nested: boolean): FuelItem[] {
   return roots;
 }
 
-function formatEuros(value: number): string {
-  return new Intl.NumberFormat('fr-FR', {
+function formatDollars(value: number): string {
+  return new Intl.NumberFormat('en-US', {
     style: 'currency',
-    currency: 'EUR',
+    currency: 'USD',
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(value);

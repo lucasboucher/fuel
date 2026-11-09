@@ -8,11 +8,17 @@ Unofficial Cursor sidebar extension that shows your team plan spend for the curr
 
 ## Requirements
 
-- [Cursor](https://cursor.com) (VS Code engine `^1.128`)
+- [Cursor](https://cursor.com) with VS Code engine `^1.128` (see `engines.vscode` in `package.json`)
 - A **Team** plan with permission to create an Admin API key
-- Node **26.13** (via [fnm](https://github.com/Schniz/fnm)) and **pnpm 12.18** to build the `.vsix`
 
-UI copy is **French**. Code, commits, and this README are **English**.
+**Two Node versions (on purpose):**
+
+- **Run** (inside Cursor): Node **24** — extension host. The `.vsix` is built with esbuild `target: node24` and only uses host APIs (`fetch`, `AbortSignal.timeout`, `node:sqlite`).
+- **Build** (on your machine): Node **26.13** + **pnpm 12.18** — from `.nvmrc` and `packageManager`. For `pnpm install` / `check` / `test` / `package` only.
+
+`package.json` → `engines` lists **only** `vscode`, so it is not read as “Cursor must run Node 26”.
+
+UI copy is **French**. Code, commits, and this README are **English**. Amounts from the Admin API are **USD**.
 
 ## API key
 
@@ -41,7 +47,7 @@ cd fuel
 fnm use
 pnpm install
 pnpm package
-cursor --install-extension ./fuel-1.0.0.vsix --force
+cursor --install-extension ./fuel-1.0.1.vsix --force
 ```
 
 Reload the Cursor window. Open the Fuel view, paste the Team API key, then refresh.
@@ -50,14 +56,14 @@ Optional: set `"workbench.activityBar.orientation": "vertical"` if the activity-
 
 ## Usage
 
-The TreeView shows identity, **Usage** (Total inclus + model pools), **Dépenses**, **Cycle**, and a dashboard link. The activity-bar badge is `totalPercentUsed` only (rounded).
+The TreeView shows identity, **Usage** (Total inclus + model pools when the plan returns them), **Dépenses** (USD), **Cycle**, and a dashboard link. The activity-bar badge is `totalPercentUsed` only (rounded). On pooled plans without `includedSpendCents`, included spend is derived as overall − on-demand.
 
 Refresh runs every 15 minutes while the view is visible and the window is focused; sooner on manual refresh or when returning focus to a stale snapshot. One request at a time, 10 s timeout, exponential backoff after errors.
 
 ## Development
 
 ```bash
-fnm use
+fnm use   # reads .nvmrc → Node 26.13
 pnpm install
 pnpm check
 pnpm test
@@ -67,6 +73,7 @@ pnpm test
 - [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
 - Branch: `main` only
 - Lint / format: Biome (`pnpm lint`, `pnpm lint:fix`)
+- Runtime target: keep esbuild on `node24` so the `.vsix` matches Cursor’s extension host
 
 ## License
 

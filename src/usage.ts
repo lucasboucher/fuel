@@ -1,10 +1,10 @@
 export type SpendSnapshot = {
   email: string;
   name?: string;
-  overallSpendEuros: number;
-  includedSpendEuros: number;
-  onDemandSpendEuros: number;
-  limitEuros?: number;
+  overallSpendDollars: number;
+  includedSpendDollars: number;
+  onDemandSpendDollars: number;
+  limitDollars?: number;
   percentUsed?: number;
   cursorModelsPercent?: number;
   otherModelsPercent?: number;
@@ -12,6 +12,49 @@ export type SpendSnapshot = {
   cycleStart?: string;
   fetchedAt: string;
 };
+
+export function snapshotForAccount(
+  value: unknown,
+  email: string | undefined,
+): SpendSnapshot | undefined {
+  if (!email || !isSpendSnapshot(value)) {
+    return undefined;
+  }
+  if (value.email.trim().toLowerCase() !== email.trim().toLowerCase()) {
+    return undefined;
+  }
+  return value;
+}
+
+export function mustForgetSnapshot(cached: unknown, email: string | undefined): boolean {
+  if (cached === undefined) {
+    return false;
+  }
+  if (!isSpendSnapshot(cached)) {
+    return true;
+  }
+  if (!email) {
+    return false;
+  }
+  return snapshotForAccount(cached, email) === undefined;
+}
+
+export function isSpendSnapshot(value: unknown): value is SpendSnapshot {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const snapshot = value as Record<string, unknown>;
+  return (
+    typeof snapshot.email === 'string' &&
+    typeof snapshot.overallSpendDollars === 'number' &&
+    Number.isFinite(snapshot.overallSpendDollars) &&
+    typeof snapshot.includedSpendDollars === 'number' &&
+    Number.isFinite(snapshot.includedSpendDollars) &&
+    typeof snapshot.onDemandSpendDollars === 'number' &&
+    Number.isFinite(snapshot.onDemandSpendDollars) &&
+    typeof snapshot.fetchedAt === 'string'
+  );
+}
 
 export type UsageErrorCode =
   | 'missing_email'
@@ -126,7 +169,10 @@ async function postSpend(
 
 async function detailMessage(response: Response, fallback: string): Promise<string> {
   try {
-    const payload = (await response.json()) as { message?: string; error?: string };
+    const payload = (await response.json()) as {
+      message?: string;
+      error?: string;
+    };
     const detail = payload.message?.trim() || payload.error?.trim();
     if (detail) {
       return `${fallback} (${detail})`;
@@ -144,29 +190,36 @@ export function normalizeSpend(
 ): SpendSnapshot {
   const members = payload.teamMemberSpend ?? [];
   const target = email.trim().toLowerCase();
-  const member =
-    members.find((item) => item.email?.trim().toLowerCase() === target) ??
-    (members.length === 1 ? members[0] : undefined);
+  const member = members.find((item) => item.email?.trim().toLowerCase() === target);
 
   if (!member) {
     throw new UsageError('not_found', 'Aucune dépense trouvée pour cet e-mail.');
   }
 
-  const includedSpendEuros = centsToEuros(member.includedSpendCents);
-  const onDemandSpendEuros = centsToEuros(member.spendCents);
-  const overallSpendEuros =
-    typeof member.overallSpendCents === 'number' && Number.isFinite(member.overallSpendCents)
-      ? centsToEuros(member.overallSpendCents)
-      : roundMoney(includedSpendEuros + onDemandSpendEuros);
+  const onDemandSpendDollars = centsToDollars(member.spendCents);
+  const hasIncluded = Number.isFinite(member.includedSpendCents);
+  const hasOverall = Number.isFinite(member.overallSpendCents);
+
+  // Prefer API included cents. Otherwise derive in cents, then round once to dollars.
+  const includedSpendDollars = hasIncluded
+    ? centsToDollars(member.includedSpendCents)
+    : hasOverall
+      ? centsToDollars(
+          Math.max(0, finiteCents(member.overallSpendCents) - finiteCents(member.spendCents)),
+        )
+      : 0;
+
+  const overallSpendDollars = hasOverall
+    ? centsToDollars(member.overallSpendCents)
+    : roundMoney(includedSpendDollars + onDemandSpendDollars);
 
   const limitDollars = firstPositive(
     member.effectivePerUserLimitDollars,
     member.monthlyLimitDollars,
   );
-  const limitEuros = limitDollars === undefined ? undefined : limitDollars;
   const percentUsed =
-    limitEuros !== undefined && limitEuros > 0
-      ? Math.min(100, Math.round((overallSpendEuros / limitEuros) * 1000) / 10)
+    limitDollars !== undefined && limitDollars > 0
+      ? Math.min(100, Math.round((overallSpendDollars / limitDollars) * 1000) / 10)
       : undefined;
 
   const cursorModelsPercent = normalizePercent(member.autoPercentUsed);
@@ -175,9 +228,9 @@ export function normalizeSpend(
 
   const snapshot: SpendSnapshot = {
     email: member.email?.trim() || email,
-    overallSpendEuros,
-    includedSpendEuros,
-    onDemandSpendEuros,
+    overallSpendDollars,
+    includedSpendDollars,
+    onDemandSpendDollars,
     fetchedAt,
   };
 
@@ -185,8 +238,8 @@ export function normalizeSpend(
   if (name) {
     snapshot.name = name;
   }
-  if (limitEuros !== undefined) {
-    snapshot.limitEuros = limitEuros;
+  if (limitDollars !== undefined) {
+    snapshot.limitDollars = limitDollars;
   }
   if (percentUsed !== undefined) {
     snapshot.percentUsed = percentUsed;
@@ -200,18 +253,25 @@ export function normalizeSpend(
   if (totalPercentUsed !== undefined) {
     snapshot.totalPercentUsed = totalPercentUsed;
   }
-  if (typeof payload.subscriptionCycleStart === 'number') {
+  if (
+    typeof payload.subscriptionCycleStart === 'number' &&
+    Number.isFinite(payload.subscriptionCycleStart)
+  ) {
     snapshot.cycleStart = new Date(payload.subscriptionCycleStart).toISOString();
   }
 
   return snapshot;
 }
 
-function centsToEuros(cents: number | undefined): number {
+function finiteCents(cents: number | undefined): number {
   if (typeof cents !== 'number' || !Number.isFinite(cents) || cents < 0) {
     return 0;
   }
-  return Math.round(cents) / 100;
+  return cents;
+}
+
+function centsToDollars(cents: number | undefined): number {
+  return roundMoney(finiteCents(cents) / 100);
 }
 
 function roundMoney(value: number): number {

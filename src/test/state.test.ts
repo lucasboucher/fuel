@@ -6,9 +6,9 @@ import type { SpendSnapshot } from '../usage.js';
 function snapshot(partial: Partial<SpendSnapshot> = {}): SpendSnapshot {
   return {
     email: 'ada@example.com',
-    overallSpendEuros: 0,
-    includedSpendEuros: 0,
-    onDemandSpendEuros: 0,
+    overallSpendDollars: 0,
+    includedSpendDollars: 0,
+    onDemandSpendDollars: 0,
     fetchedAt: '2026-11-09T12:00:00.000Z',
     ...partial,
   };
