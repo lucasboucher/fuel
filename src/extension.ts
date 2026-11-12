@@ -222,6 +222,8 @@ export function activate(context: vscode.ExtensionContext): void {
       schedulePoll(shouldRefreshNow(windowState.focused));
     }),
     vscode.commands.registerCommand('fuel.refresh', refresh),
+    vscode.commands.registerCommand('fuel.expandAll', () => treeDataProvider.expandAll()),
+    vscode.commands.registerCommand('fuel.collapseAll', () => treeDataProvider.collapseAll()),
     vscode.commands.registerCommand('fuel.openDashboard', openDashboard),
     {
       dispose() {

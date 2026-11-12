@@ -66,6 +66,18 @@
         "enablement": "!fuel.refreshing"
       },
       {
+        "command": "fuel.expandAll",
+        "title": "Tout déplier",
+        "icon": "$(expand-all)",
+        "category": "Cursor Fuel"
+      },
+      {
+        "command": "fuel.collapseAll",
+        "title": "Tout replier",
+        "icon": "$(collapse-all)",
+        "category": "Cursor Fuel"
+      },
+      {
         "command": "fuel.openDashboard",
         "title": "Voir sur cursor.com",
         "icon": "$(link-external)",
@@ -80,9 +92,19 @@
           "group": "navigation@1"
         },
         {
+          "command": "fuel.expandAll",
+          "when": "view == fuel.view && !fuel.treeExpanded",
+          "group": "navigation@2"
+        },
+        {
+          "command": "fuel.collapseAll",
+          "when": "view == fuel.view && fuel.treeExpanded",
+          "group": "navigation@2"
+        },
+        {
           "command": "fuel.openDashboard",
           "when": "view == fuel.view",
-          "group": "navigation@2"
+          "group": "navigation@3"
         }
       ]
     }

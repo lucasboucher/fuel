@@ -16,6 +16,7 @@ import type { UsageSnapshot } from './usage.js';
 import { badgePercentFor, type ViewState } from './view-state.js';
 
 const ACTIVE_ICON_COLOR = new vscode.ThemeColor('activityBarBadge.background');
+const TREE_EXPANDED_KEY = 'fuel.treeExpanded';
 
 type FuelNode = {
   id: string;
@@ -43,19 +44,46 @@ export class FuelTreeDataProvider implements vscode.TreeDataProvider<FuelNode>, 
   private state: ViewState = { kind: 'loading' };
   private treeView?: vscode.TreeView<FuelNode>;
   private lastActiveKey = '';
+  private roots: FuelNode[] = [];
+  private readonly expandedRootIds = new Set<string>();
+  private readonly treeViewListeners: vscode.Disposable[] = [];
 
   attach(treeView: vscode.TreeView<FuelNode>): void {
     this.treeView = treeView;
+    for (const listener of this.treeViewListeners) {
+      listener.dispose();
+    }
+    this.treeViewListeners.length = 0;
+    this.treeViewListeners.push(
+      treeView.onDidExpandElement((event) => {
+        if (this.isCollapsibleRootId(event.element.id)) {
+          this.expandedRootIds.add(event.element.id);
+          this.syncExpandedContext();
+        }
+      }),
+      treeView.onDidCollapseElement((event) => {
+        if (this.isCollapsibleRootId(event.element.id)) {
+          this.expandedRootIds.delete(event.element.id);
+          this.syncExpandedContext();
+        }
+      }),
+    );
     this.syncTreeView();
+    this.syncExpandedContext();
   }
 
   dispose(): void {
+    for (const listener of this.treeViewListeners) {
+      listener.dispose();
+    }
+    this.treeViewListeners.length = 0;
     this.onDidChangeTreeDataEmitter.dispose();
   }
 
   setState(state: ViewState): void {
     this.state = state;
     this.lastActiveKey = activeContextKey(this.activeContext());
+    this.rebuildRoots();
     this.onDidChangeTreeDataEmitter.fire(undefined);
     this.syncTreeView();
   }
@@ -67,11 +95,41 @@ export class FuelTreeDataProvider implements vscode.TreeDataProvider<FuelNode>, 
       return;
     }
     this.lastActiveKey = key;
+    this.rebuildRoots();
     this.onDidChangeTreeDataEmitter.fire(undefined);
   }
 
   getState(): ViewState {
     return this.state;
+  }
+
+  /** Open top-level groups only (projects stay collapsed). */
+  async expandAll(): Promise<void> {
+    if (!this.treeView) {
+      return;
+    }
+    await this.focusView();
+    await vscode.commands.executeCommand('list.collapseAll');
+    this.expandedRootIds.clear();
+    for (const root of this.roots) {
+      if (!root.children?.length) {
+        continue;
+      }
+      try {
+        await this.treeView.reveal(root, { expand: true, focus: false, select: false });
+        this.expandedRootIds.add(root.id);
+      } catch {
+        // Tree may have refreshed while we were expanding.
+      }
+    }
+    this.syncExpandedContext();
+  }
+
+  async collapseAll(): Promise<void> {
+    await this.focusView();
+    await vscode.commands.executeCommand('list.collapseAll');
+    this.expandedRootIds.clear();
+    this.syncExpandedContext();
   }
 
   getTreeItem(node: FuelNode): vscode.TreeItem {
@@ -98,8 +156,49 @@ export class FuelTreeDataProvider implements vscode.TreeDataProvider<FuelNode>, 
     if (node) {
       return node.children ?? [];
     }
+    return this.roots;
+  }
+
+  private rebuildRoots(): void {
+    const hadRoots = this.roots.length > 0;
     const snapshot = shownSnapshot(this.state);
-    return snapshot ? snapshotNodes(snapshot, this.activeContext()) : [];
+    this.roots = snapshot ? snapshotNodes(snapshot, this.activeContext()) : [];
+
+    const rootIds = new Set(this.collapsibleRootIds());
+    for (const id of [...this.expandedRootIds]) {
+      if (!rootIds.has(id)) {
+        this.expandedRootIds.delete(id);
+      }
+    }
+    // First paint: top groups use Expanded in getTreeItem.
+    if (!hadRoots && this.roots.length > 0 && this.expandedRootIds.size === 0) {
+      for (const id of rootIds) {
+        this.expandedRootIds.add(id);
+      }
+    }
+    this.syncExpandedContext();
+  }
+
+  private collapsibleRootIds(): string[] {
+    return this.roots.filter((node) => node.children?.length).map((node) => node.id);
+  }
+
+  private isCollapsibleRootId(id: string): boolean {
+    return this.collapsibleRootIds().includes(id);
+  }
+
+  private async focusView(): Promise<void> {
+    try {
+      await vscode.commands.executeCommand(`${FuelTreeDataProvider.viewId}.focus`);
+    } catch {
+      // View may already be focused.
+    }
+  }
+
+  private syncExpandedContext(): void {
+    const rootIds = this.collapsibleRootIds();
+    const expanded = rootIds.length > 0 && rootIds.every((id) => this.expandedRootIds.has(id));
+    void vscode.commands.executeCommand('setContext', TREE_EXPANDED_KEY, expanded);
   }
 
   private activeContext(): ActiveContext {
