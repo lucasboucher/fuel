@@ -9,12 +9,14 @@ import {
   UsageError,
   type UsageSnapshot,
 } from './usage.js';
-import { FuelTreeDataProvider } from './view.js';
+import { composerIdFromOpenTarget, FuelTreeDataProvider } from './view.js';
 import type { ViewState } from './view-state.js';
 
 const SNAPSHOT_KEY = 'fuel.snapshot';
 const REFRESHING_CONTEXT_KEY = 'fuel.refreshing';
 const DASHBOARD_URL = 'https://cursor.com/dashboard/spending';
+/** Cursor-private command; no Glass fallback. */
+const CURSOR_OPEN_COMPOSER_COMMAND = 'composer.openComposer';
 
 export function activate(context: vscode.ExtensionContext): void {
   const treeDataProvider = new FuelTreeDataProvider();
@@ -186,6 +188,18 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
+  const openConversation = async (target: unknown): Promise<void> => {
+    const conversationId = composerIdFromOpenTarget(target);
+    if (!conversationId) {
+      return;
+    }
+    try {
+      await vscode.commands.executeCommand(CURSOR_OPEN_COMPOSER_COMMAND, conversationId);
+    } catch {
+      void vscode.window.showErrorMessage('Impossible d’ouvrir cette conversation.');
+    }
+  };
+
   const shouldRefreshNow = (windowFocused: boolean): boolean => {
     const state = treeDataProvider.getState();
     return shouldRefreshOnFocus({
@@ -224,6 +238,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('fuel.refresh', refresh),
     vscode.commands.registerCommand('fuel.expandAll', () => treeDataProvider.expandAll()),
     vscode.commands.registerCommand('fuel.collapseAll', () => treeDataProvider.collapseAll()),
+    vscode.commands.registerCommand('fuel.openConversation', openConversation),
     vscode.commands.registerCommand('fuel.openDashboard', openDashboard),
     {
       dispose() {

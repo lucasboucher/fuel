@@ -78,6 +78,11 @@
         "category": "Cursor Fuel"
       },
       {
+        "command": "fuel.openConversation",
+        "title": "Ouvrir la conversation",
+        "category": "Cursor Fuel"
+      },
+      {
         "command": "fuel.openDashboard",
         "title": "Voir sur cursor.com",
         "icon": "$(link-external)",
@@ -105,6 +110,13 @@
           "command": "fuel.openDashboard",
           "when": "view == fuel.view",
           "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "fuel.openConversation",
+          "when": "view == fuel.view && viewItem == conversation",
+          "group": "0_open@1"
         }
       ]
     }

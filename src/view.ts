@@ -10,6 +10,7 @@ import {
   matchConversationId,
   type TokenBreakdown,
   totalTokens,
+  UNATTACHED_CONVERSATION_ID,
 } from './conversations.js';
 import { UNASSIGNED_PROJECT_NAME } from './transcripts.js';
 import type { UsageSnapshot } from './usage.js';
@@ -17,6 +18,7 @@ import { badgePercentFor, type ViewState } from './view-state.js';
 
 const ACTIVE_ICON_COLOR = new vscode.ThemeColor('activityBarBadge.background');
 const TREE_EXPANDED_KEY = 'fuel.treeExpanded';
+const CONVERSATION_CONTEXT = 'conversation';
 
 type FuelNode = {
   id: string;
@@ -25,8 +27,18 @@ type FuelNode = {
   tooltip?: string;
   icon?: vscode.ThemeIcon;
   collapsed?: boolean;
+  contextValue?: string;
+  composerId?: string;
   children?: FuelNode[];
 };
+
+export function composerIdFromOpenTarget(target: unknown): string | undefined {
+  if (!target || typeof target !== 'object') {
+    return undefined;
+  }
+  const composerId = (target as FuelNode).composerId;
+  return typeof composerId === 'string' && composerId.length > 0 ? composerId : undefined;
+}
 
 type ActiveContext = {
   projectName?: string;
@@ -148,6 +160,9 @@ export class FuelTreeDataProvider implements vscode.TreeDataProvider<FuelNode>, 
     }
     if (node.tooltip !== undefined) {
       item.tooltip = node.tooltip;
+    }
+    if (node.contextValue !== undefined) {
+      item.contextValue = node.contextValue;
     }
     return item;
   }
@@ -434,6 +449,12 @@ function snapshotNodes(snapshot: UsageSnapshot, active: ActiveContext): FuelNode
           ),
           collapsed: true,
           children: modelNodes(conversation.id, conversation.models),
+          ...(conversation.id !== UNATTACHED_CONVERSATION_ID
+            ? {
+                contextValue: CONVERSATION_CONTEXT,
+                composerId: conversation.id,
+              }
+            : {}),
         };
       }),
     };
