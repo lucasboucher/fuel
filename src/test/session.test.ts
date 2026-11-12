@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
 import { createCipheriv, pbkdf2Sync } from 'node:crypto';
+import sqlite from 'node:sqlite';
 import { test } from 'node:test';
-import { buildSessionCookie, decryptAccessToken, parseCursorAccount } from '../session.js';
+import {
+  buildSessionCookie,
+  decryptAccessToken,
+  parseCursorAccount,
+  readSessionCookie,
+} from '../session.js';
 
 test('opens a sealed v10 editor access token', () => {
   const token = jwt({ sub: 'user_1', exp: 4_102_444_800 });
@@ -9,6 +16,34 @@ test('opens a sealed v10 editor access token', () => {
   assert.equal(decryptAccessToken(sealed, 'secret'), token);
   assert.equal(decryptAccessToken(sealed, 'wrong'), undefined);
   assert.equal(decryptAccessToken(token, 'secret'), undefined);
+});
+
+test('reads plaintext sessions without the keychain and rejects invalid tokens', async (t) => {
+  let stored = jwt({ sub: 'auth0|user_1', exp: 4_102_444_800 });
+  t.mock.method(
+    sqlite,
+    'DatabaseSync',
+    class extends sqlite.DatabaseSync {
+      constructor() {
+        super(':memory:');
+        this.exec('CREATE TABLE ItemTable (key TEXT, value TEXT)');
+        this.prepare('INSERT INTO ItemTable VALUES (?, ?)').run('cursorAuth/accessToken', stored);
+      }
+    },
+  );
+  const keychain = t.mock.method(childProcess, 'execFile', () => {
+    throw new Error('Unexpected Keychain call');
+  });
+
+  assert.deepEqual(await readSessionCookie(), {
+    status: 'ready',
+    value: buildSessionCookie(stored),
+  });
+  stored = 'not-a-token';
+  assert.deepEqual(await readSessionCookie(), { status: 'missing' });
+  stored = jwt({ sub: 'auth0|user_1', exp: 1 });
+  assert.deepEqual(await readSessionCookie(), { status: 'expired' });
+  assert.equal(keychain.mock.callCount(), 0);
 });
 
 test('reads an account only when email, name, and team are present', () => {

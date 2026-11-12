@@ -22,12 +22,12 @@ UI copy is **French**. Code, commits, and this README are **English**. Amounts a
 
 ## Sign-in
 
-Fuel uses the Cursor account already signed in on this Mac. The first refresh can ask for the Keychain item **Cursor Safe Storage**. Allow it once. A denial stays quiet until **Rafraîchir**. Fuel does not store or log the session token.
+Fuel uses the Cursor account already signed in on this Mac. When Cursor stored the session sealed, the first refresh can ask for the Keychain item **Cursor Safe Storage**. Allow it once. A denial stays quiet until **Rafraîchir**. A plaintext JWT needs no Keychain prompt. Fuel does not store or log the session token.
 
 ## Privacy
 
 - **Account** → `state.vscdb`, keys `cursorAuth/cachedEmail`, `cursorAuth/cachedScopedProfile` (name), and `cursorAuth/cachedTeam` (team), via `node:sqlite` read-only.
-- **Editor session** → `cursorAuth/accessToken` from that same DB, decrypted with the Keychain item `Cursor Safe Storage`, used only for `GET https://cursor.com/api/usage-summary`.
+- **Editor session** → `cursorAuth/accessToken` from that same DB. A sealed value (`cursor-safe-storage:v1:`) is decrypted with the Keychain item `Cursor Safe Storage`. A plaintext JWT is used as stored. Either way, only for `GET https://cursor.com/api/usage-summary`.
 - **Last snapshot** → `globalState` for instant display after reload.
 - No telemetry. No Team API key.
 

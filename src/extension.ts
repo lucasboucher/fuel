@@ -233,7 +233,7 @@ export function deactivate(): void {}
 const BLOCKED_MESSAGES = {
   missing_account: 'Aucun compte Cursor connecté. Connecte-toi dans Cursor.',
   missing_session:
-    'Session Cursor illisible. Autorise le trousseau « Cursor Safe Storage », puis Rafraîchir.',
+    'Session Cursor illisible. Reconnecte-toi dans Cursor (et autorise « Cursor Safe Storage » si demandé), puis Rafraîchir.',
   expired_session: 'Session Cursor expirée. Reviens sur cette fenêtre pour réessayer.',
 } as const;
 
