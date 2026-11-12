@@ -4,15 +4,19 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-const STATE_DB_PATH = join(
-  homedir(),
-  'Library',
-  'Application Support',
-  'Cursor',
-  'User',
-  'globalStorage',
-  'state.vscdb',
-);
+export function defaultStateDbPath(): string {
+  return join(
+    homedir(),
+    'Library',
+    'Application Support',
+    'Cursor',
+    'User',
+    'globalStorage',
+    'state.vscdb',
+  );
+}
+
+const STATE_DB_PATH = defaultStateDbPath();
 const CACHED_EMAIL_KEY = 'cursorAuth/cachedEmail';
 const CACHED_PROFILE_KEY = 'cursorAuth/cachedScopedProfile';
 const CACHED_TEAM_KEY = 'cursorAuth/cachedTeam';

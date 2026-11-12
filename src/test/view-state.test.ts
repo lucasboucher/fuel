@@ -18,6 +18,7 @@ const snapshot: UsageSnapshot = {
   cycleStart: '2026-10-11T09:38:09.000Z',
   cycleEnd: '2026-11-11T09:38:09.000Z',
   fetchedAt: '2026-11-09T12:00:00.000Z',
+  conversations: [],
 };
 
 test('badge uses totalPercentUsed on a ready state', () => {

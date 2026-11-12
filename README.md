@@ -2,7 +2,7 @@
 
 Short name: **fuel**.
 
-Unofficial Cursor sidebar extension that shows your plan spend for the current billing cycle: included usage, on-demand spend, the team spend limit, and cycle dates — without opening the browser.
+Unofficial Cursor sidebar extension that shows your plan spend for the current billing cycle: included usage, on-demand spend, the team spend limit, per-conversation charged cost, and cycle dates — without opening the browser.
 
 **Not affiliated with Anysphere or Cursor.** “Cursor” is a trademark of its respective owners. This project reads the signed-in editor session. It is not an official product.
 
@@ -27,7 +27,9 @@ Fuel uses the Cursor account already signed in on this Mac. When Cursor stored t
 ## Privacy
 
 - **Account** → `state.vscdb`, keys `cursorAuth/cachedEmail`, `cursorAuth/cachedScopedProfile` (name), and `cursorAuth/cachedTeam` (team), via `node:sqlite` read-only.
-- **Editor session** → `cursorAuth/accessToken` from that same DB. A sealed value (`cursor-safe-storage:v1:`) is decrypted with the Keychain item `Cursor Safe Storage`. A plaintext JWT is used as stored. Either way, only for `GET https://cursor.com/api/usage-summary`.
+- **Editor session** → `cursorAuth/accessToken` from that same DB. A sealed value (`cursor-safe-storage:v1:`) is decrypted with the Keychain item `Cursor Safe Storage`. A plaintext JWT is used as stored. Either way, for `GET https://cursor.com/api/usage-summary` and `POST https://cursor.com/api/dashboard/get-filtered-usage-events`.
+- **Conversation labels** → `state.vscdb` table `composerHeaders` (`composerId` → JSON `name`, workspace folder).
+- **Active highlight** → current workspace folder name; focused conversation from live `tabGroups` (input UUID or title match); icons use theme color `activityBarBadge.background`.
 - **Last snapshot** → `globalState` for instant display after reload.
 - No telemetry. No Team API key.
 
@@ -39,7 +41,7 @@ cd fuel
 fnm use
 pnpm install
 pnpm package
-cursor --install-extension ./fuel-1.1.0.vsix --force
+cursor --install-extension ./fuel-1.2.0.vsix --force
 ```
 
 Reload the Cursor window. Open the Fuel view. Allow the Keychain prompt if macOS asks.
@@ -48,7 +50,9 @@ Optional: set `"workbench.activityBar.orientation": "vertical"` if the activity-
 
 ## Usage
 
-The TreeView shows your name and email, with the team settings under them (team, on-demand on or off, and the team limit while on-demand is on). Then **Usage inclus** (total and model pools), **Dépenses** (total first, then included and on-demand, in USD), and **Cycle** (start, last refresh, end). The view title has **Rafraîchir** and **Voir sur cursor.com**. The activity-bar badge is `totalPercentUsed`, rounded.
+The TreeView shows your name and email, with the team settings under them (team, on-demand on or off, and the team limit while on-demand is on). Then **Usage inclus** (total and model pools), **Dépenses** (total first, then included and on-demand, in USD), **Conversations** (one collapsed row per project, then each chat’s title with Cursor’s charged amount; expand a chat for per-model charged rows, then lecture/écriture cache, entrée, sortie, and total tokens; hover shows the latest usage-event date; sorted by that date, newest first), and **Cycle** (start, last refresh, end). The view title has **Rafraîchir** and **Voir sur cursor.com**. The activity-bar badge is `totalPercentUsed`, rounded.
+
+Conversation amounts are Cursor’s `chargedCents` on usage events. Models and token counts come from each event’s `model` and `tokenUsage`. The plan total under **Dépenses** is unchanged.
 
 Fuel loads once Cursor has started, so the badge is there before you open the view. Refresh runs every 5 minutes while the window is focused, sooner on manual refresh or when returning focus to a stale snapshot. One request at a time, 10 s timeout, exponential backoff after errors.
 

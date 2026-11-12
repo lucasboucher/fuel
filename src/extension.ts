@@ -115,6 +115,12 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
 
+      // Paint the last snapshot before Keychain / network so reload feels instant.
+      if (account && cachedSnapshot) {
+        lastSuccessAt = Date.parse(cachedSnapshot.fetchedAt);
+        treeDataProvider.setState({ kind: 'ready', snapshot: cachedSnapshot });
+      }
+
       if (!account) {
         treeDataProvider.setState(blockedViewState('missing_account'));
         consecutiveFailures = 0;
@@ -133,15 +139,8 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       const cookie = session.value;
 
-      const viewState = treeDataProvider.getState();
-      const showsCachedFailure = viewState.kind === 'error' && viewState.snapshot !== undefined;
-      if (viewState.kind !== 'ready' && !showsCachedFailure) {
-        if (cachedSnapshot) {
-          lastSuccessAt = Date.parse(cachedSnapshot.fetchedAt);
-          treeDataProvider.setState({ kind: 'ready', snapshot: cachedSnapshot });
-        } else if (viewState.kind === 'error') {
-          treeDataProvider.setState({ kind: 'loading' });
-        }
+      if (!cachedSnapshot && treeDataProvider.getState().kind === 'error') {
+        treeDataProvider.setState({ kind: 'loading' });
       }
 
       try {
@@ -205,6 +204,15 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     treeView,
     treeDataProvider,
+    vscode.window.tabGroups.onDidChangeTabs(() => {
+      treeDataProvider.refreshActiveIcons();
+    }),
+    vscode.window.tabGroups.onDidChangeTabGroups(() => {
+      treeDataProvider.refreshActiveIcons();
+    }),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      treeDataProvider.refreshActiveIcons();
+    }),
     treeView.onDidChangeVisibility((event) => {
       if (event.visible) {
         schedulePoll(shouldRefreshNow(vscode.window.state.focused));

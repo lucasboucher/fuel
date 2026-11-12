@@ -1,4 +1,15 @@
+import {
+  type ConversationSpend,
+  conversationIdsForLabels,
+  groupConversationSpends,
+  isConversationSpend,
+  parseUsageEvent,
+  type UsageEvent,
+} from './conversations.js';
 import type { CursorAccount } from './session.js';
+import { readConversationLabels } from './transcripts.js';
+
+export type { ConversationSpend };
 
 export type UsageSnapshot = {
   email: string;
@@ -15,6 +26,7 @@ export type UsageSnapshot = {
   cycleStart: string;
   cycleEnd: string;
   fetchedAt: string;
+  conversations: ConversationSpend[];
 };
 
 export function snapshotForAccount(
@@ -63,7 +75,9 @@ export function isUsageSnapshot(value: unknown): value is UsageSnapshot {
     isNonNegativeNumber(snapshot.totalPercentUsed) &&
     isDateString(snapshot.cycleStart) &&
     isDateString(snapshot.cycleEnd) &&
-    isDateString(snapshot.fetchedAt)
+    isDateString(snapshot.fetchedAt) &&
+    Array.isArray(snapshot.conversations) &&
+    snapshot.conversations.every(isConversationSpend)
   );
 }
 
@@ -97,7 +111,10 @@ export class UsageError extends Error {
 }
 
 const USAGE_SUMMARY_URL = 'https://cursor.com/api/usage-summary';
+const FILTERED_USAGE_EVENTS_URL = 'https://cursor.com/api/dashboard/get-filtered-usage-events';
 const REQUEST_TIMEOUT_MS = 10_000;
+const PAGE_SIZE = 1000;
+const MAX_PAGES = 200;
 
 type UsageSummary = {
   billingCycleStart: unknown;
@@ -118,6 +135,7 @@ export function snapshotFromSummary(
   payload: unknown,
   account: CursorAccount,
   fetchedAt: string,
+  conversations: ConversationSpend[],
 ): UsageSnapshot {
   if (!payload || typeof payload !== 'object') {
     throw unreadableSummaryError();
@@ -148,6 +166,7 @@ export function snapshotFromSummary(
     cycleStart: requireIsoDate(summary.billingCycleStart),
     cycleEnd: requireIsoDate(summary.billingCycleEnd),
     fetchedAt,
+    conversations,
   };
 }
 
@@ -155,10 +174,85 @@ export async function fetchUsageSnapshot(input: {
   cookie: string;
   account: CursorAccount;
 }): Promise<UsageSnapshot> {
+  const summaryPayload = await fetchJson(USAGE_SUMMARY_URL, {
+    headers: { Cookie: input.cookie },
+  });
+  const fetchedAt = new Date().toISOString();
+  const snapshot = snapshotFromSummary(summaryPayload, input.account, fetchedAt, []);
+  const startMs = Date.parse(snapshot.cycleStart);
+  const endMs = Date.parse(snapshot.cycleEnd);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+    throw unreadableSummaryError();
+  }
+  const events = await fetchUsageEvents(input.cookie, startMs, endMs);
+  const labelsById = readConversationLabels(conversationIdsForLabels(events));
+  return {
+    ...snapshot,
+    conversations: groupConversationSpends(events, labelsById),
+  };
+}
+
+async function fetchUsageEvents(
+  cookie: string,
+  startDate: number,
+  endDate: number,
+): Promise<UsageEvent[]> {
+  const events: UsageEvent[] = [];
+  let page = 1;
+  let total = Infinity;
+
+  while ((page - 1) * PAGE_SIZE < total) {
+    if (page > MAX_PAGES) {
+      throw unreadableSummaryError();
+    }
+
+    const payload = await fetchJson(FILTERED_USAGE_EVENTS_URL, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        Cookie: cookie,
+        Origin: 'https://cursor.com',
+        Referer: 'https://cursor.com/dashboard?tab=usage',
+      },
+      body: JSON.stringify({
+        startDate: String(startDate),
+        endDate: String(endDate),
+        page,
+        pageSize: PAGE_SIZE,
+      }),
+    });
+
+    if (!payload || typeof payload !== 'object') {
+      throw unreadableSummaryError();
+    }
+    const body = payload as Record<string, unknown>;
+    total = requireNonNegativeNumber(body.totalUsageEventsCount);
+    if (!Array.isArray(body.usageEventsDisplay)) {
+      throw unreadableSummaryError();
+    }
+    const rows = body.usageEventsDisplay;
+    for (const row of rows) {
+      const event = parseUsageEvent(row);
+      if (!event) {
+        throw unreadableSummaryError();
+      }
+      events.push(event);
+    }
+    if (rows.length === 0) {
+      break;
+    }
+    page += 1;
+  }
+
+  return events;
+}
+
+async function fetchJson(url: string, init: RequestInit): Promise<unknown> {
   let response: Response;
   try {
-    response = await fetch(USAGE_SUMMARY_URL, {
-      headers: { Cookie: input.cookie },
+    response = await fetch(url, {
+      ...init,
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch {
@@ -175,13 +269,11 @@ export async function fetchUsageSnapshot(input: {
     );
   }
 
-  let payload: unknown;
   try {
-    payload = await response.json();
+    return await response.json();
   } catch {
     throw unreadableSummaryError();
   }
-  return snapshotFromSummary(payload, input.account, new Date().toISOString());
 }
 
 function unreadableSummaryError(): UsageError {
