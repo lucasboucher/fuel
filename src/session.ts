@@ -99,33 +99,37 @@ export function buildSessionCookie(accessToken: string): string | undefined {
   return `WorkosCursorSessionToken=${encodeURIComponent(`${userId}::${accessToken}`)}`;
 }
 
-let accessTokenCache: { sealed: string; accessToken: string } | undefined;
+let accessTokenCache: { stored: string; accessToken: string } | undefined;
 
 type AccessTokenRead = { status: 'ready'; accessToken: string } | { status: 'missing' | 'expired' };
 
 async function readAccessToken(): Promise<AccessTokenRead> {
-  let sealed: string | undefined;
+  let stored: string | undefined;
   try {
-    sealed = readStateItem(ACCESS_TOKEN_KEY);
+    stored = readStateItem(ACCESS_TOKEN_KEY);
   } catch {
     return { status: 'missing' };
   }
-  if (!sealed) {
+  if (!stored) {
     return { status: 'missing' };
   }
-  // Each decrypt can raise a Keychain prompt.
-  if (accessTokenCache?.sealed === sealed && isJwtUnexpired(accessTokenCache.accessToken)) {
+  if (accessTokenCache?.stored === stored && isJwtUnexpired(accessTokenCache.accessToken)) {
     return { status: 'ready', accessToken: accessTokenCache.accessToken };
   }
-  const password = await readSafeStoragePassword();
-  const accessToken = password ? decryptAccessToken(sealed, password) : undefined;
+  let accessToken: string | undefined;
+  if (stored.startsWith(SAFE_STORAGE_PREFIX)) {
+    const password = await readSafeStoragePassword();
+    accessToken = password ? decryptAccessToken(stored, password) : undefined;
+  } else {
+    accessToken = decodeJwtPayload(stored) ? stored : undefined;
+  }
   if (!accessToken) {
     return { status: 'missing' };
   }
   if (!isJwtUnexpired(accessToken)) {
     return { status: 'expired' };
   }
-  accessTokenCache = { sealed, accessToken };
+  accessTokenCache = { stored, accessToken };
   return { status: 'ready', accessToken };
 }
 
