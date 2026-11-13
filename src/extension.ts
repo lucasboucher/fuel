@@ -9,7 +9,7 @@ import {
   UsageError,
   type UsageSnapshot,
 } from './usage.js';
-import { composerIdFromOpenTarget, FuelTreeDataProvider } from './view.js';
+import { composerIdFromOpenTarget, copyTextFromTarget, FuelTreeDataProvider } from './view.js';
 import type { ViewState } from './view-state.js';
 
 const SNAPSHOT_KEY = 'fuel.snapshot';
@@ -215,6 +215,21 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   treeDataProvider.attach(treeView);
 
+  const copyValue = async (target: unknown): Promise<void> => {
+    const text = copyTextFromTarget(target, (id) => treeDataProvider.copyTextForId(id));
+    if (!text) {
+      void vscode.window.showErrorMessage('Impossible de copier la valeur.');
+      return;
+    }
+    try {
+      await vscode.env.clipboard.writeText(text);
+    } catch {
+      void vscode.window.showErrorMessage('Impossible de copier la valeur.');
+      return;
+    }
+    void vscode.window.showInformationMessage('La valeur a bien été copiée dans le presse-papier.');
+  };
+
   context.subscriptions.push(
     treeView,
     treeDataProvider,
@@ -239,6 +254,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('fuel.expandAll', () => treeDataProvider.expandAll()),
     vscode.commands.registerCommand('fuel.collapseAll', () => treeDataProvider.collapseAll()),
     vscode.commands.registerCommand('fuel.openConversation', openConversation),
+    vscode.commands.registerCommand('fuel.copyValue', copyValue),
     vscode.commands.registerCommand('fuel.openDashboard', openDashboard),
     {
       dispose() {

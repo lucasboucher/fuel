@@ -19,6 +19,7 @@ import { badgePercentFor, type ViewState } from './view-state.js';
 const ACTIVE_ICON_COLOR = new vscode.ThemeColor('activityBarBadge.background');
 const TREE_EXPANDED_KEY = 'fuel.treeExpanded';
 const CONVERSATION_CONTEXT = 'conversation';
+const COPYABLE_CONTEXT = 'hasCopy';
 
 type FuelNode = {
   id: string;
@@ -29,6 +30,7 @@ type FuelNode = {
   collapsed?: boolean;
   contextValue?: string;
   composerId?: string;
+  copyText?: string;
   children?: FuelNode[];
 };
 
@@ -38,6 +40,38 @@ export function composerIdFromOpenTarget(target: unknown): string | undefined {
   }
   const composerId = (target as FuelNode).composerId;
   return typeof composerId === 'string' && composerId.length > 0 ? composerId : undefined;
+}
+
+export function copyTextFromTarget(
+  target: unknown,
+  lookup?: (id: string) => string | undefined,
+): string | undefined {
+  if (!target || typeof target !== 'object') {
+    return undefined;
+  }
+  const node = target as FuelNode;
+  if (typeof node.copyText === 'string' && node.copyText.length > 0) {
+    return node.copyText;
+  }
+  if (typeof node.id === 'string' && lookup) {
+    return lookup(node.id);
+  }
+  return undefined;
+}
+
+function joinContext(...parts: Array<string | undefined>): string | undefined {
+  // Space-separated tags for viewItem =~ /tag/ when clauses.
+  const joined = parts.filter((part): part is string => part !== undefined && part.length > 0);
+  return joined.length > 0 ? joined.join(' ') : undefined;
+}
+
+function withCopyText(node: FuelNode, copyText: string): FuelNode {
+  const contextValue = joinContext(node.contextValue, COPYABLE_CONTEXT);
+  return {
+    ...node,
+    copyText,
+    ...(contextValue !== undefined ? { contextValue } : {}),
+  };
 }
 
 type ActiveContext = {
@@ -90,6 +124,10 @@ export class FuelTreeDataProvider implements vscode.TreeDataProvider<FuelNode>, 
     }
     this.treeViewListeners.length = 0;
     this.onDidChangeTreeDataEmitter.dispose();
+  }
+
+  copyTextForId(id: string): string | undefined {
+    return findNodeById(this.roots, id)?.copyText;
   }
 
   setState(state: ViewState): void {
@@ -237,6 +275,21 @@ export class FuelTreeDataProvider implements vscode.TreeDataProvider<FuelNode>, 
   }
 }
 
+function findNodeById(nodes: readonly FuelNode[], id: string): FuelNode | undefined {
+  for (const node of nodes) {
+    if (node.id === id) {
+      return node;
+    }
+    if (node.children?.length) {
+      const found = findNodeById(node.children, id);
+      if (found) {
+        return found;
+      }
+    }
+  }
+  return undefined;
+}
+
 function readActiveContext(conversations: readonly ConversationSpend[]): ActiveContext {
   const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   const projectName = folder ? basename(folder) || undefined : undefined;
@@ -334,93 +387,143 @@ function viewMessage(state: ViewState): string {
 }
 
 function snapshotNodes(snapshot: UsageSnapshot, active: ActiveContext): FuelNode[] {
+  const onDemandLabel = snapshot.teamOnDemandEnabled ? 'Activé' : 'Désactivé';
+  const teamLimitLabel =
+    snapshot.teamSpendLimitDollars === null
+      ? 'Sans limite'
+      : formatDollars(snapshot.teamSpendLimitDollars);
+
   const teamNodes: FuelNode[] = [
-    {
-      id: 'team-name',
-      label: snapshot.teamName,
-      icon: new vscode.ThemeIcon('organization'),
-    },
-    {
-      id: 'team-on-demand',
-      label: 'À la demande',
-      description: snapshot.teamOnDemandEnabled ? 'Activé' : 'Désactivé',
-      icon: new vscode.ThemeIcon('zap'),
-    },
+    withCopyText(
+      {
+        id: 'team-name',
+        label: snapshot.teamName,
+        icon: new vscode.ThemeIcon('organization'),
+      },
+      snapshot.teamName,
+    ),
+    withCopyText(
+      {
+        id: 'team-on-demand',
+        label: 'À la demande',
+        description: onDemandLabel,
+        icon: new vscode.ThemeIcon('zap'),
+      },
+      onDemandLabel,
+    ),
   ];
 
   if (snapshot.teamOnDemandEnabled) {
-    teamNodes.push({
-      id: 'team-spend-limit',
-      label: 'Limite d’équipe',
-      description:
-        snapshot.teamSpendLimitDollars === null
-          ? 'Sans limite'
-          : formatDollars(snapshot.teamSpendLimitDollars),
-      icon: new vscode.ThemeIcon('target'),
-    });
+    teamNodes.push(
+      withCopyText(
+        {
+          id: 'team-spend-limit',
+          label: 'Limite d’équipe',
+          description: teamLimitLabel,
+          icon: new vscode.ThemeIcon('target'),
+        },
+        teamLimitLabel,
+      ),
+    );
   }
 
+  const usageTotal = formatPercent(snapshot.totalPercentUsed);
+  const usageCursor = formatPercent(snapshot.cursorModelsPercentUsed);
+  const usageOther = formatPercent(snapshot.otherModelsPercentUsed);
   const usageNodes: FuelNode[] = [
-    {
-      id: 'usage-total',
-      label: 'Total',
-      description: formatPercent(snapshot.totalPercentUsed),
-      icon: new vscode.ThemeIcon('dashboard'),
-    },
-    {
-      id: 'usage-cursor-models',
-      label: 'Modèles Cursor',
-      description: formatPercent(snapshot.cursorModelsPercentUsed),
-      icon: new vscode.ThemeIcon('sparkle'),
-    },
-    {
-      id: 'usage-other-models',
-      label: 'Autres modèles',
-      description: formatPercent(snapshot.otherModelsPercentUsed),
-      icon: new vscode.ThemeIcon('symbol-misc'),
-    },
+    withCopyText(
+      {
+        id: 'usage-total',
+        label: 'Total',
+        description: usageTotal,
+        icon: new vscode.ThemeIcon('dashboard'),
+      },
+      usageTotal,
+    ),
+    withCopyText(
+      {
+        id: 'usage-cursor-models',
+        label: 'Modèles Cursor',
+        description: usageCursor,
+        icon: new vscode.ThemeIcon('sparkle'),
+      },
+      usageCursor,
+    ),
+    withCopyText(
+      {
+        id: 'usage-other-models',
+        label: 'Autres modèles',
+        description: usageOther,
+        icon: new vscode.ThemeIcon('symbol-misc'),
+      },
+      usageOther,
+    ),
   ];
 
+  const spendOverall = formatDollars(snapshot.overallSpendDollars);
+  const spendIncluded = formatDollars(snapshot.includedSpendDollars);
+  const spendOnDemand = formatDollars(snapshot.onDemandSpendDollars);
   const spendNodes: FuelNode[] = [
-    {
-      id: 'spend-overall',
-      label: 'Total',
-      description: formatDollars(snapshot.overallSpendDollars),
-      icon: new vscode.ThemeIcon('graph'),
-    },
-    {
-      id: 'spend-included',
-      label: 'Incluse',
-      description: formatDollars(snapshot.includedSpendDollars),
-      icon: new vscode.ThemeIcon('pass'),
-    },
-    {
-      id: 'spend-on-demand',
-      label: 'À la demande',
-      description: formatDollars(snapshot.onDemandSpendDollars),
-      icon: new vscode.ThemeIcon('flame'),
-    },
+    withCopyText(
+      {
+        id: 'spend-overall',
+        label: 'Total',
+        description: spendOverall,
+        icon: new vscode.ThemeIcon('graph'),
+      },
+      spendOverall,
+    ),
+    withCopyText(
+      {
+        id: 'spend-included',
+        label: 'Incluse',
+        description: spendIncluded,
+        icon: new vscode.ThemeIcon('pass'),
+      },
+      spendIncluded,
+    ),
+    withCopyText(
+      {
+        id: 'spend-on-demand',
+        label: 'À la demande',
+        description: spendOnDemand,
+        icon: new vscode.ThemeIcon('flame'),
+      },
+      spendOnDemand,
+    ),
   ];
 
+  const cycleStart = formatDateTime(snapshot.cycleStart);
+  const cycleFetched = formatDateTime(snapshot.fetchedAt);
+  const cycleEnd = formatDateTime(snapshot.cycleEnd);
   const cycleNodes: FuelNode[] = [
-    {
-      id: 'cycle-start',
-      label: 'Début',
-      description: formatDateTime(snapshot.cycleStart),
-      icon: new vscode.ThemeIcon('calendar'),
-    },
-    {
-      id: 'cycle-fetched-at',
-      label: 'Mis à jour',
-      description: formatDateTime(snapshot.fetchedAt),
-      icon: new vscode.ThemeIcon('clock'),
-    },
-    {
-      id: 'cycle-end',
-      label: 'Fin',
-      description: formatDateTime(snapshot.cycleEnd),
-      icon: new vscode.ThemeIcon('milestone'),
-    },
+    withCopyText(
+      {
+        id: 'cycle-start',
+        label: 'Début',
+        description: cycleStart,
+        icon: new vscode.ThemeIcon('calendar'),
+      },
+      cycleStart,
+    ),
+    withCopyText(
+      {
+        id: 'cycle-fetched-at',
+        label: 'Mis à jour',
+        description: cycleFetched,
+        icon: new vscode.ThemeIcon('clock'),
+      },
+      cycleFetched,
+    ),
+    withCopyText(
+      {
+        id: 'cycle-end',
+        label: 'Fin',
+        description: cycleEnd,
+        icon: new vscode.ThemeIcon('milestone'),
+      },
+      cycleEnd,
+    ),
   ];
 
   const conversationNodes: FuelNode[] = groupByProject(snapshot.conversations).map((project) => {
@@ -429,45 +532,56 @@ function snapshotNodes(snapshot: UsageSnapshot, active: ActiveContext): FuelNode
       project.name !== UNASSIGNED_PROJECT_NAME &&
       active.projectName !== undefined &&
       project.name === active.projectName;
-    return {
-      id: `project-${project.name}`,
-      label: project.name,
-      description: formatDollars(project.chargedDollars),
-      icon: themeIcon(projectIconId, projectActive),
-      collapsed: true,
-      children: project.conversations.map((conversation) => {
-        const conversationActive =
-          active.conversationId !== undefined && conversation.id === active.conversationId;
-        return {
-          id: `conversation-${conversation.id}`,
-          label: conversation.title,
-          description: formatDollars(conversation.chargedDollars),
-          tooltip: formatDateTime(conversation.lastEventAt),
-          icon: themeIcon(
-            conversationIconId(conversation.id, conversation.title),
-            conversationActive,
-          ),
-          collapsed: true,
-          children: modelNodes(conversation.id, conversation.models),
-          ...(conversation.id !== UNATTACHED_CONVERSATION_ID
-            ? {
-                contextValue: CONVERSATION_CONTEXT,
-                composerId: conversation.id,
-              }
-            : {}),
-        };
-      }),
-    };
+    const projectCharged = formatDollars(project.chargedDollars);
+    return withCopyText(
+      {
+        id: `project-${project.name}`,
+        label: project.name,
+        description: projectCharged,
+        icon: themeIcon(projectIconId, projectActive),
+        collapsed: true,
+        children: project.conversations.map((conversation) => {
+          const conversationActive =
+            active.conversationId !== undefined && conversation.id === active.conversationId;
+          const charged = formatDollars(conversation.chargedDollars);
+          return withCopyText(
+            {
+              id: `conversation-${conversation.id}`,
+              label: conversation.title,
+              description: charged,
+              tooltip: formatDateTime(conversation.lastEventAt),
+              icon: themeIcon(
+                conversationIconId(conversation.id, conversation.title),
+                conversationActive,
+              ),
+              collapsed: true,
+              children: modelNodes(conversation.id, conversation.models),
+              ...(conversation.id !== UNATTACHED_CONVERSATION_ID
+                ? {
+                    contextValue: CONVERSATION_CONTEXT,
+                    composerId: conversation.id,
+                  }
+                : {}),
+            },
+            charged,
+          );
+        }),
+      },
+      projectCharged,
+    );
   });
 
   return [
-    {
-      id: 'identity',
-      label: snapshot.displayName,
-      description: snapshot.email,
-      icon: new vscode.ThemeIcon('account'),
-      children: teamNodes,
-    },
+    withCopyText(
+      {
+        id: 'identity',
+        label: snapshot.displayName,
+        description: snapshot.email,
+        icon: new vscode.ThemeIcon('account'),
+        children: teamNodes,
+      },
+      snapshot.email,
+    ),
     {
       id: 'group-usage',
       label: 'Usage inclus',
@@ -485,7 +599,9 @@ function snapshotNodes(snapshot: UsageSnapshot, active: ActiveContext): FuelNode
       label: 'Conversations',
       icon: new vscode.ThemeIcon('library'),
       children: conversationNodes,
-      ...(snapshot.conversations.length === 0 ? { description: 'Aucune' } : {}),
+      ...(snapshot.conversations.length === 0
+        ? { description: 'Aucune', copyText: 'Aucune', contextValue: COPYABLE_CONTEXT }
+        : {}),
     },
     {
       id: 'group-cycle',
@@ -530,17 +646,24 @@ function modelNodes(conversationId: string, models: readonly ModelSpend[]): Fuel
     const label = formatModelLabel(model.model);
     const tokenTotal = totalTokens(model.tokens);
     const emptyShell = tokenTotal === 0 && model.chargedDollars === 0;
-    const node: FuelNode = {
+    let node: FuelNode = {
       id: `conversation-${conversationId}-model-${modelKey}`,
       label,
       icon: new vscode.ThemeIcon('chip'),
     };
     if (!emptyShell) {
-      node.description = formatDollars(model.chargedDollars);
-      node.tooltip =
-        label === model.model
-          ? formatTokens(tokenTotal)
-          : `${model.model} · ${formatTokens(tokenTotal)}`;
+      const charged = formatDollars(model.chargedDollars);
+      node = withCopyText(
+        {
+          ...node,
+          description: charged,
+          tooltip:
+            label === model.model
+              ? formatTokens(tokenTotal)
+              : `${model.model} · ${formatTokens(tokenTotal)}`,
+        },
+        charged,
+      );
     } else if (label !== model.model) {
       node.tooltip = model.model;
     }
@@ -553,37 +676,57 @@ function modelNodes(conversationId: string, models: readonly ModelSpend[]): Fuel
 }
 
 function tokenNodes(prefix: string, tokens: TokenBreakdown): FuelNode[] {
+  const cacheRead = formatTokens(tokens.cacheRead);
+  const cacheWrite = formatTokens(tokens.cacheWrite);
+  const input = formatTokens(tokens.input);
+  const output = formatTokens(tokens.output);
+  const total = formatTokens(totalTokens(tokens));
   return [
-    {
-      id: `${prefix}-cache-read`,
-      label: 'Lecture cache',
-      description: formatTokens(tokens.cacheRead),
-      icon: new vscode.ThemeIcon('archive'),
-    },
-    {
-      id: `${prefix}-cache-write`,
-      label: 'Écriture cache',
-      description: formatTokens(tokens.cacheWrite),
-      icon: new vscode.ThemeIcon('save'),
-    },
-    {
-      id: `${prefix}-input`,
-      label: 'Entrée',
-      description: formatTokens(tokens.input),
-      icon: new vscode.ThemeIcon('arrow-down'),
-    },
-    {
-      id: `${prefix}-output`,
-      label: 'Sortie',
-      description: formatTokens(tokens.output),
-      icon: new vscode.ThemeIcon('arrow-up'),
-    },
-    {
-      id: `${prefix}-total`,
-      label: 'Total',
-      description: formatTokens(totalTokens(tokens)),
-      icon: new vscode.ThemeIcon('symbol-number'),
-    },
+    withCopyText(
+      {
+        id: `${prefix}-cache-read`,
+        label: 'Lecture cache',
+        description: cacheRead,
+        icon: new vscode.ThemeIcon('archive'),
+      },
+      cacheRead,
+    ),
+    withCopyText(
+      {
+        id: `${prefix}-cache-write`,
+        label: 'Écriture cache',
+        description: cacheWrite,
+        icon: new vscode.ThemeIcon('save'),
+      },
+      cacheWrite,
+    ),
+    withCopyText(
+      {
+        id: `${prefix}-input`,
+        label: 'Entrée',
+        description: input,
+        icon: new vscode.ThemeIcon('arrow-down'),
+      },
+      input,
+    ),
+    withCopyText(
+      {
+        id: `${prefix}-output`,
+        label: 'Sortie',
+        description: output,
+        icon: new vscode.ThemeIcon('arrow-up'),
+      },
+      output,
+    ),
+    withCopyText(
+      {
+        id: `${prefix}-total`,
+        label: 'Total',
+        description: total,
+        icon: new vscode.ThemeIcon('symbol-number'),
+      },
+      total,
+    ),
   ];
 }
 

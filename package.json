@@ -83,6 +83,12 @@
         "category": "Cursor Fuel"
       },
       {
+        "command": "fuel.copyValue",
+        "title": "Copier la valeur",
+        "icon": "$(copy)",
+        "category": "Cursor Fuel"
+      },
+      {
         "command": "fuel.openDashboard",
         "title": "Voir sur cursor.com",
         "icon": "$(link-external)",
@@ -115,8 +121,13 @@
       "view/item/context": [
         {
           "command": "fuel.openConversation",
-          "when": "view == fuel.view && viewItem == conversation",
+          "when": "view == fuel.view && viewItem =~ /^conversation/",
           "group": "0_open@1"
+        },
+        {
+          "command": "fuel.copyValue",
+          "when": "view == fuel.view && viewItem =~ /hasCopy/",
+          "group": "inline@1"
         }
       ]
     }
