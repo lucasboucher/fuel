@@ -232,6 +232,10 @@ export class FuelTreeDataProvider implements vscode.TreeDataProvider<FuelNode>, 
     return this.roots;
   }
 
+  getParent(element: FuelNode): FuelNode | undefined {
+    return findParentById(this.roots, element.id);
+  }
+
   private rebuildRoots(): void {
     const hadRoots = this.roots.length > 0;
     const snapshot = shownSnapshot(this.state);
@@ -269,8 +273,8 @@ export class FuelTreeDataProvider implements vscode.TreeDataProvider<FuelNode>, 
   }
 
   private syncExpandedContext(): void {
-    const rootIds = this.collapsibleRootIds();
-    const expanded = rootIds.length > 0 && rootIds.every((id) => this.expandedRootIds.has(id));
+    // Any top group open → show Tout replier; only fully collapsed → Tout déplier.
+    const expanded = this.expandedRootIds.size > 0;
     void vscode.commands.executeCommand('setContext', TREE_EXPANDED_KEY, expanded);
   }
 
@@ -302,6 +306,21 @@ function findNodeById(nodes: readonly FuelNode[], id: string): FuelNode | undefi
     }
     if (node.children?.length) {
       const found = findNodeById(node.children, id);
+      if (found) {
+        return found;
+      }
+    }
+  }
+  return undefined;
+}
+
+function findParentById(nodes: readonly FuelNode[], childId: string): FuelNode | undefined {
+  for (const node of nodes) {
+    if (node.children?.some((child) => child.id === childId)) {
+      return node;
+    }
+    if (node.children?.length) {
+      const found = findParentById(node.children, childId);
       if (found) {
         return found;
       }
